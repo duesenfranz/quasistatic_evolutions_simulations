@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "quasistatic-evol"
+version = "0.1.0"
+description = ""
+authors = ["Jona Klemenc <jona.klemenc@posteo.de>"]
+readme = "README.md"
+packages = [{include = "quasistatic_evol"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+torch = "^2.4.1"
+tqdm = "^4.66.5"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
