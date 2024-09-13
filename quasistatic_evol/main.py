@@ -11,18 +11,20 @@ W = 10.0
 N = 30
 C_surface_average = 0.03
 C_surface_std = 0.005
-L = W / N / 1.5
-k_stretch = 1.0
+L = W / N / 1.3
+k_stretch = 0.2
 c_angle = 0.0
 learning_rate = 0.1
 decay_factor = 1
 min_learning_rate = 0.001
 tolerance = 5e-5
 max_iterations = 100000
-d = 2.5
-time_steps = 100
+d = 5
+time_steps = 20
 plot_interval = N // 10
 error_norm_p = 2
+
+
 
 
 
@@ -105,7 +107,7 @@ def compute_stress_vector(positions: Tensor, fracture_vector: Tensor) -> Tensor:
     distances = torch.sqrt(dx**2 + dy**2)
 
     # Compute stress for all segments
-    stress = (k_stretch * (distances - L)) ** 2
+    stress =  k_stretch *(distances - L) ** 2 / L
 
     # Apply fracture weights
     weights = 1 - fracture_vector
@@ -182,7 +184,7 @@ def plot_stick(positions: Tensor, fracture_vector: Tensor, iteration: int, step:
                     linewidth=2)
 
     # Plot points
-    ax.plot(x_positions, y_positions, 'ko', markersize=2)
+    ax.plot(x_positions, y_positions, 'ko', markersize=0.5)
 
     ax.set_title(f"Stick Configuration at Step {step}, Iteration {iteration}")
     ax.set_xlabel("X Position")
