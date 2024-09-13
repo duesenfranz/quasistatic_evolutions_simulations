@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from tqdm import tqdm
 import numpy as np
-from torch.optim import Adam
 
 # Constants
 H = 1.0
@@ -15,15 +14,15 @@ C_surface_std = 0.005
 L = W / N / 1.5
 k_stretch = 1.0
 c_angle = 0.0
-learning_rate = 0.005
-decay_factor = 0.99
+learning_rate = 0.1
+decay_factor = 1
 min_learning_rate = 0.001
-tolerance = 1e-5
+tolerance = 5e-5
 max_iterations = 100000
 d = 2.5
 time_steps = 100
 plot_interval = N // 10
-error_norm_p = 4
+error_norm_p = 2
 
 
 
@@ -146,7 +145,7 @@ def total_energy(
     return surface_energy + elastic_energy
 
 
-def plot_stick(positions: Tensor, fracture_vector: Tensor, iteration: int, step: int):
+def plot_stick(positions: Tensor, fracture_vector: Tensor, iteration: int, step: int, max_stress: float):
     """
     Plots the stick's current positions in 2D, coloring each segment based on stress.
 
@@ -172,7 +171,7 @@ def plot_stick(positions: Tensor, fracture_vector: Tensor, iteration: int, step:
     
     # Create a colormap
     cmap = plt.get_cmap('coolwarm')
-    norm = mcolors.Normalize(vmin=0, vmax=C_surface_average * 1.5)
+    norm = mcolors.Normalize(vmin=0, vmax=max_stress)
 
     # Plot segments with color based on stress
     for i in range(len(x_positions) - 1):
@@ -211,7 +210,7 @@ def optimize_energy(
     step: int,
 ) -> tuple[Tensor, Tensor, int]:
     """
-    Performs optimization using Adam to minimize the total energy.
+    Performs optimization using vanilla gradient descent to minimize the total energy.
 
     :param positions: A (2, N) tensor of initial positions.
     :param fracture_vector: An (N-1) tensor of floats between 0 and 1.
@@ -220,40 +219,45 @@ def optimize_energy(
     :param step: Current time step.
     :return: A tuple of the optimized positions, the final minimized energy, and iterations.
     """
+    max_stress = torch.min(surface_energy_constants).item() * 1.2
+
     total_energy_fct = torch.jit.trace(
         total_energy, (positions, fracture_vector, surface_energy_constants)
     )
     positions.requires_grad_(True)
     fracture_vector.requires_grad_(True)
 
-    # Initialize Adam optimizer
-    optimizer = Adam([positions, fracture_vector], lr=learning_rate)
+    current_lr = learning_rate
 
     for iteration in tqdm(range(max_iterations), leave=False):
-        optimizer.zero_grad()
-
         energy = total_energy_fct(positions, fracture_vector, surface_energy_constants)
         energy.backward()
 
         with torch.no_grad():
-            positions.grad[position_mask] = 0  # Fix masked positions
-
-        optimizer.step()
-
-        with torch.no_grad():
-            # Ensure fracture_vector stays between 0 and 1
-            fracture_vector.clamp_(0, 1)
-
-            # If the fracture vector is close to 0 or 1, we must ignore the corresponding gradient
-            # for the convergence check.
-            fractor_gradient_finished = (fracture_vector == 0) | (fracture_vector == 1)
             gradient_norm = np.linalg.norm(
-                positions.grad.cpu().numpy().flatten(), ord=error_norm_p
+                (positions.grad  * (~position_mask)).cpu().numpy().flatten(), ord=error_norm_p
             )
+            # Update positions
+            positions -= current_lr * positions.grad * (~position_mask)
+            positions.grad.zero_()
+
+            # Update fracture vector
+            fracture_vector -= current_lr * fracture_vector.grad
+            fracture_vector.grad.zero_()
+
+            # Apply constraints
+            positions.data[position_mask] = positions[position_mask]  # Fix masked positions
+            fracture_vector.clamp_(0, 1)  # Ensure fracture_vector stays between 0 and 1
+
+            # Check for convergence
+            fractor_gradient_finished = (fracture_vector == 0) | (fracture_vector == 1)
 
             if fractor_gradient_finished.all() and (gradient_norm < tolerance):
-                plot_stick(positions, fracture_vector, iteration, step)
+                plot_stick(positions, fracture_vector, iteration, step, max_stress)
                 break
+
+        # Decay learning rate
+        current_lr = max(current_lr * decay_factor, min_learning_rate)
 
     else:
         plot_stick(positions, fracture_vector, iteration, step)
