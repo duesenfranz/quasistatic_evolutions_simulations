@@ -1,19 +1,21 @@
 import torch
 from torch import Tensor
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from tqdm import tqdm
 import numpy as np
 
 # Constants
 H = 1.0
 W = 10.0
-N = 50
+N = 30
 C_surface_average = 0.0006
 C_surface_std = 0.0001
 L = W / N
 k_stretch = 1.0
 c_angle = 0.0
 learning_rate = 0.2
+decay_factor = 0.99
 tolerance = 5e-6
 max_iterations = 100000
 d = 2.5
@@ -21,6 +23,9 @@ time_steps = 50
 plot_interval = N // 10
 error_norm_p = 4
 
+# Global variables for the figure and axes
+fig = None
+ax = None
 
 # Enable interactive mode
 plt.ion()
@@ -80,13 +85,13 @@ def compute_surface_energy(
     return torch.sum(fracture_vector * surface_energy_constants)
 
 
-def compute_elastic_energy(positions: Tensor, fracture_vector: Tensor) -> Tensor:
+def compute_stress_vector(positions: Tensor, fracture_vector: Tensor) -> Tensor:
     """
-    Computes the elastic energy based on angle differences and stretching/compression.
+    Computes the stress vector based on the positions of the stick segments and fracture state.
 
     :param positions: A (2, N) tensor of positions.
     :param fracture_vector: An (N-1) tensor of floats between 0 and 1.
-    :return: The total elastic energy.
+    :return: An (N-1) tensor of stress values for each segment, adjusted for fractures.
     """
     x_positions = positions[0]
     y_positions = positions[1]
@@ -96,12 +101,30 @@ def compute_elastic_energy(positions: Tensor, fracture_vector: Tensor) -> Tensor
     dy = y_positions[1:] - y_positions[:-1]
     distances = torch.sqrt(dx**2 + dy**2)
 
-    # Compute stretch energy in parallel for all segments
-    stretch_energy = k_stretch * (distances - L) ** 2
+    # Compute stress for all segments
+    stress = k_stretch * (distances - L)
 
     # Apply fracture weights
     weights = 1 - fracture_vector
-    total_energy = torch.sum(stretch_energy * weights)
+    adjusted_stress = stress * weights
+
+    return adjusted_stress
+
+
+def compute_elastic_energy(positions: Tensor, fracture_vector: Tensor) -> Tensor:
+    """
+    Computes the elastic energy based on stress and fracture state.
+
+    :param positions: A (2, N) tensor of positions.
+    :param fracture_vector: An (N-1) tensor of floats between 0 and 1.
+    :return: The total elastic energy.
+    """
+    stress = compute_stress_vector(positions, fracture_vector)
+    
+    # Compute elastic energy
+    elastic_energy = stress**2
+
+    total_energy = torch.sum(elastic_energy)
 
     return total_energy
 
@@ -122,29 +145,62 @@ def total_energy(
     return surface_energy + elastic_energy
 
 
-def plot_stick(positions: Tensor, iteration: int, step: int):
+def plot_stick(positions: Tensor, fracture_vector: Tensor, iteration: int, step: int):
     """
-    Plots the stick's current positions in 2D.
+    Plots the stick's current positions in 2D, coloring each segment based on stress.
 
     :param positions: A (2, N) tensor of current positions.
+    :param fracture_vector: An (N-1) tensor of floats between 0 and 1.
     :param iteration: Current iteration number.
     :param step: Current time step.
     """
+    global fig, ax
+    
     x_positions = positions[0].detach().cpu().numpy()
     y_positions = positions[1].detach().cpu().numpy()
 
-    plt.clf()  # Clear the previous figure
-    plt.plot(x_positions, y_positions, marker="o")
-    plt.title(f"Stick Configuration at Step {step}, Iteration {iteration}")
-    plt.xlabel("X Position")
-    plt.ylabel("Y Position")
-    plt.grid(True)
+    # Compute stress vector
+    stress = compute_stress_vector(positions, fracture_vector).detach().cpu().numpy()
+
+    if fig is None or ax is None:
+        # Create a new figure and axis if they don't exist
+        fig, ax = plt.subplots(figsize=(10, 6))
+    else:
+        # Clear the existing plot
+        ax.clear()
+    
+    # Create a colormap
+    cmap = plt.get_cmap('coolwarm')
+    norm = mcolors.Normalize(vmin=0, vmax=0.5)
+
+    # Plot segments with color based on stress
+    # for i in range(len(x_positions) - 1):
+    #     ax.plot([x_positions[i], x_positions[i+1]], 
+    #             [y_positions[i], y_positions[i+1]], 
+    #             color=cmap(norm(stress[i])),
+    #             linewidth=2)
+
+    # Plot points
+    ax.plot(x_positions, y_positions, 'ko', markersize=4)
+
+    ax.set_title(f"Stick Configuration at Step {step}, Iteration {iteration}")
+    ax.set_xlabel("X Position")
+    ax.set_ylabel("Y Position")
+    ax.grid(True)
     # Set the y-axis limits to always range from -d to d
-    plt.ylim(-d, d)
+    ax.set_ylim(-d, d)
+
+    # Add a colorbar
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    if len(ax.figure.axes) > 1:
+        # If colorbar exists, update it
+        ax.figure.axes[1].remove()
+    plt.colorbar(sm, ax=ax, label='Stress')
 
     # This allows the plot to update without blocking
     plt.draw()
-    plt.pause(0.1)  # Pause briefly to allow the figure to update
+    plt.pause(0.2)  # Pause briefly to allow the figure to update
 
 
 def optimize_energy(
@@ -178,7 +234,7 @@ def optimize_energy(
         with torch.no_grad():
             positions.grad[position_mask] = 0  # Fix masked positions
             positions -= learning_rate * positions.grad
-            fracture_vector -= learning_rate * fracture_vector.grad
+            fracture_vector -= learning_rate * fracture_vector.grad * decay_factor ** iteration
 
             # Ensure fracture_vector stays between 0 and 1
             fracture_vector.clamp_(0, 1)
@@ -194,7 +250,7 @@ def optimize_energy(
             if fractor_gradient_finished.all() and (gradient_norm < tolerance):
                 # print(f"Converged after {iteration} iterations.")
                 # print(f"breaks: {fracture_vector.sum()}")
-                plot_stick(positions, iteration, step)
+                plot_stick(positions, fracture_vector, iteration, step)
                 positions.grad.zero_()
                 fracture_vector.grad.zero_()
                 break
@@ -243,6 +299,9 @@ def main():
     # Plot results
     plt.ioff()
     plot_results(energies, positions_over_time, iterations_per_step)
+
+    # Add this at the end of the main function
+    plt.show()  # This will keep the final plot open
 
 
 def plot_results(energies, positions_over_time, iterations_per_step):
