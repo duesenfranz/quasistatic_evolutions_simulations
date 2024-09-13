@@ -2,22 +2,28 @@ import torch
 from torch import Tensor
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import numpy as np
 
 # Constants
 H = 1.0
 W = 10.0
-N = 20
-C_surface_average = 0.0015
+N = 50
+C_surface_average = 0.0006
 C_surface_std = 0.0001
 L = W / N
 k_stretch = 1.0
 c_angle = 0.0
 learning_rate = 0.2
-tolerance = 3e-6
-max_iterations = 10000
-d = 2.0
-time_steps = 1000
+tolerance = 5e-6
+max_iterations = 100000
+d = 2.5
+time_steps = 50
 plot_interval = N // 10
+error_norm_p = 4
+
+
+# Enable interactive mode
+plt.ion()
 
 
 def initialize_surface_energy() -> Tensor:
@@ -82,23 +88,20 @@ def compute_elastic_energy(positions: Tensor, fracture_vector: Tensor) -> Tensor
     :param fracture_vector: An (N-1) tensor of floats between 0 and 1.
     :return: The total elastic energy.
     """
-    angles = compute_angles_from_positions(positions)
     x_positions = positions[0]
     y_positions = positions[1]
-    total_energy = 0.0
 
-    for i in range(N - 1):
-        weight = 1 - fracture_vector[i]
-        # if i < N - 2:
-        #     angle_diff = torch.abs(angles[i + 1] - angles[i])
-        #
-        #     total_energy += weight * angle_diff * c_angle
+    # Compute dx, dy, and distances for all segments
+    dx = x_positions[1:] - x_positions[:-1]
+    dy = y_positions[1:] - y_positions[:-1]
+    distances = torch.sqrt(dx**2 + dy**2)
 
-        dx = x_positions[i + 1] - x_positions[i]
-        dy = y_positions[i + 1] - y_positions[i]
-        distance = torch.sqrt(dx**2 + dy**2)
-        stretch_energy = k_stretch * (distance - L) ** 2
-        total_energy += stretch_energy * weight
+    # Compute stretch energy in parallel for all segments
+    stretch_energy = k_stretch * (distances - L) ** 2
+
+    # Apply fracture weights
+    weights = 1 - fracture_vector
+    total_energy = torch.sum(stretch_energy * weights)
 
     return total_energy
 
@@ -130,13 +133,18 @@ def plot_stick(positions: Tensor, iteration: int, step: int):
     x_positions = positions[0].detach().cpu().numpy()
     y_positions = positions[1].detach().cpu().numpy()
 
-    plt.figure(figsize=(6, 3))
+    plt.clf()  # Clear the previous figure
     plt.plot(x_positions, y_positions, marker="o")
     plt.title(f"Stick Configuration at Step {step}, Iteration {iteration}")
     plt.xlabel("X Position")
     plt.ylabel("Y Position")
     plt.grid(True)
-    plt.show()
+    # Set the y-axis limits to always range from -d to d
+    plt.ylim(-d, d)
+
+    # This allows the plot to update without blocking
+    plt.draw()
+    plt.pause(0.1)  # Pause briefly to allow the figure to update
 
 
 def optimize_energy(
@@ -156,12 +164,15 @@ def optimize_energy(
     :param step: Current time step.
     :return: A tuple of the optimized positions, the final minimized energy, and iterations.
     """
+    total_energy_fct = torch.jit.trace(
+        total_energy, (positions, fracture_vector, surface_energy_constants)
+    )
     positions.requires_grad_(True)
     fracture_vector.requires_grad_(True)
 
-    for iteration in tqdm(range(max_iterations)):
+    for iteration in tqdm(range(max_iterations), leave=False):
 
-        energy = total_energy(positions, fracture_vector, surface_energy_constants)
+        energy = total_energy_fct(positions, fracture_vector, surface_energy_constants)
         energy.backward()
 
         with torch.no_grad():
@@ -176,10 +187,13 @@ def optimize_energy(
             # for the convergence check.
             fractor_gradient_finished = (fracture_vector == 0) | (fracture_vector == 1)
             grad_norm = torch.norm(positions.grad)
+            gradient_norm = np.linalg.norm(
+                positions.grad.cpu().numpy().flatten(), ord=error_norm_p
+            )
 
-            if fractor_gradient_finished.all() and (positions.grad < tolerance).all():
-                print(f"Converged after {iteration} iterations.")
-                print(f"breaks: {fracture_vector.sum()}")
+            if fractor_gradient_finished.all() and (gradient_norm < tolerance):
+                # print(f"Converged after {iteration} iterations.")
+                # print(f"breaks: {fracture_vector.sum()}")
                 plot_stick(positions, iteration, step)
                 positions.grad.zero_()
                 fracture_vector.grad.zero_()
@@ -202,11 +216,11 @@ def main():
     iterations_per_step = []
     positions_over_time = []
 
-    for n in range(time_steps):
+    for n in tqdm(range(time_steps)):
         # Update boundary conditions
         with torch.no_grad():
-            positions[1, 0] = (n) * d / N
-            positions[1, -1] = -(n) * d / N
+            positions[1, 0] = (n) * d / time_steps
+            positions[1, -1] = -(n) * d / time_steps
 
         # Fix leftmost and rightmost points (x and y positions)
         position_mask = torch.zeros_like(positions, dtype=torch.bool)
@@ -224,9 +238,10 @@ def main():
         if n % plot_interval == 0 or torch.any(fracture_vector > 0):
             positions_over_time.append(optimized_positions.clone())
 
-        print(f"Iteration {n}: Energy = {final_energy.item()}")
+        # print(f"Iteration {n}: Energy = {final_energy.item()}")
 
     # Plot results
+    plt.ioff()
     plot_results(energies, positions_over_time, iterations_per_step)
 
 
@@ -247,7 +262,7 @@ def plot_results(energies, positions_over_time, iterations_per_step):
     for i in range(10):
         idx = i * (N // 10)
         y_positions = [pos[1, idx].item() for pos in positions_over_time]
-        plt.plot(time_steps, y_positions, label=f"Position {i}")
+        plt.plot(range(len(positions_over_time)), y_positions, label=f"Position {i}")
     plt.xlabel("Time Step")
     plt.ylabel("Y Position")
     plt.title("Y Positions Over Time")
