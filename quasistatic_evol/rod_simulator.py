@@ -3,8 +3,11 @@ from pathlib import Path
 import pickle
 import torch
 from torch import Tensor
+from matplotlib import colorbar
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+from matplotlib import axes
+from matplotlib import figure
 from tqdm import tqdm
 import numpy as np
 from dataclasses import dataclass
@@ -12,6 +15,7 @@ import seaborn as sns
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.animation as animation
 import os
+from typing import Tuple
 
 
 @dataclass
@@ -47,12 +51,23 @@ class SimulationStepResult:
 
 class Simulator:
     def __init__(self, config: SimulationConfig, seed: int = 0):
+        """
+        Initialize the Simulator.
+
+        :param config: Configuration for the simulation
+        :param seed: Random seed for reproducibility
+        """
         self.config = config
         self.seed = seed
-        self.fig = None
-        self.ax = None
+        self.fig: figure.Figure | None = None
+        self.ax: axes.Axes | None = None
 
     def initialize_surface_energy(self) -> Tensor:
+        """
+        Initialize the surface energy.
+
+        :return: Initialized surface energy
+        """
         torch.manual_seed(self.seed)
         return torch.normal(
             self.config.C_surface_average,
@@ -61,14 +76,30 @@ class Simulator:
         )
 
     def initialize_positions(self) -> Tensor:
+        """
+        Initialize the positions of the rod.
+
+        :return: Initialized positions
+        """
         x_positions = torch.linspace(0, self.config.W, self.config.N)
         y_positions = torch.zeros(self.config.N)
         return torch.stack([x_positions, y_positions])
 
     def initialize_fracture(self) -> Tensor:
+        """
+        Initialize the fracture vector.
+
+        :return: Initialized fracture vector
+        """
         return torch.zeros(self.config.N - 1)
 
     def compute_angles_from_positions(self, positions: Tensor) -> Tensor:
+        """
+        Compute angles from positions.
+
+        :param positions: Current positions of the rod
+        :return: Computed angles
+        """
         x_positions = positions[0]
         y_positions = positions[1]
         dx = x_positions[1:] - x_positions[:-1]
@@ -78,11 +109,25 @@ class Simulator:
     def compute_surface_energy(
         self, fracture_vector: Tensor, surface_energy_constants: Tensor
     ) -> Tensor:
+        """
+        Compute the surface energy.
+
+        :param fracture_vector: Current fracture state
+        :param surface_energy_constants: Surface energy constants
+        :return: Computed surface energy
+        """
         return torch.sum(fracture_vector * surface_energy_constants)
 
     def compute_stress_vector(
         self, positions: Tensor, fracture_vector: Tensor
     ) -> Tensor:
+        """
+        Compute the stress vector.
+
+        :param positions: Current positions of the rod
+        :param fracture_vector: Current fracture state
+        :return: Computed stress vector
+        """
         x_positions = positions[0]
         y_positions = positions[1]
         dx = x_positions[1:] - x_positions[:-1]
@@ -95,6 +140,13 @@ class Simulator:
     def compute_elastic_energy(
         self, positions: Tensor, fracture_vector: Tensor
     ) -> Tensor:
+        """
+        Compute the elastic energy.
+
+        :param positions: Current positions of the rod
+        :param fracture_vector: Current fracture state
+        :return: Computed elastic energy
+        """
         stress = self.compute_stress_vector(positions, fracture_vector)
         return torch.sum(stress)
 
@@ -104,6 +156,14 @@ class Simulator:
         fracture_vector: Tensor,
         surface_energy_constants: Tensor,
     ) -> Tensor:
+        """
+        Compute the total energy of the system.
+
+        :param positions: Current positions of the rod
+        :param fracture_vector: Current fracture state
+        :param surface_energy_constants: Surface energy constants
+        :return: Total energy of the system
+        """
         surface_energy = self.compute_surface_energy(
             fracture_vector, surface_energy_constants
         )
@@ -115,10 +175,21 @@ class Simulator:
         simulation_step_result: SimulationStepResult,
         step: int,
         max_stress: float,
-        ax=None,
-        fig=None,
-        cbar=None,
-    ):
+        ax: axes.Axes | None = None,
+        fig: figure.Figure | None = None,
+        cbar: colorbar.Colorbar | None = None,
+    ) -> tuple[axes.Axes, colorbar.Colorbar | None]:
+        """
+        Plot the rod configuration.
+
+        :param simulation_step_result: Result of the current simulation step
+        :param step: Current step number
+        :param max_stress: Maximum stress for color scaling
+        :param ax: Matplotlib axes to plot on (optional)
+        :param fig: Matplotlib figure to plot on (optional)
+        :param cbar: Existing colorbar (optional)
+        :return: Updated axes and colorbar
+        """
         x_positions = simulation_step_result.positions[0].detach().cpu().numpy()
         y_positions = simulation_step_result.positions[1].detach().cpu().numpy()
         stress = (
@@ -130,23 +201,20 @@ class Simulator:
             .numpy()
         )
 
-        if ax is None:
+        if ax is None or fig is None:
             if self.fig is None or self.ax is None:
                 self.fig, self.ax = plt.subplots(figsize=(12, 8))
             ax = self.ax
             fig = self.fig
         ax.clear()
 
-        # Set up the plot style
         sns.set_style("whitegrid")
         sns.set_context("notebook", font_scale=1.2)
 
-        # Create a custom colormap
         colors = ["#4575b4", "#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027"]
         n_bins = 100
         cmap = LinearSegmentedColormap.from_list("custom", colors, N=n_bins)
 
-        # Plot segments with color based on stress
         for i in range(len(x_positions) - 1):
             if simulation_step_result.breakages[i] == 0:
                 ax.plot(
@@ -157,10 +225,8 @@ class Simulator:
                     alpha=0.8,
                 )
 
-        # Plot points
         ax.scatter(x_positions, y_positions, color="#2c3e50", s=30, zorder=5)
 
-        # Set labels and title
         ax.set_xlabel("X Position", fontweight="bold")
         ax.set_ylabel("Y Position", fontweight="bold")
         ax.set_title(
@@ -169,19 +235,16 @@ class Simulator:
             fontsize=14,
         )
 
-        # Set the y-axis limits
         ax.set_ylim(-self.config.d, self.config.d)
 
-        # Add a colorbar if it doesn't exist
         if cbar is None:
             sm = plt.cm.ScalarMappable(
-                cmap=cmap, norm=plt.Normalize(vmin=0, vmax=max_stress)  # type: ignore
+                cmap=cmap, norm=mcolors.Normalize(vmin=0, vmax=max_stress)
             )
             sm.set_array([])
-            cbar = fig.colorbar(sm, ax=ax, label="Stress", pad=0.1)  # type: ignore
+            cbar = fig.colorbar(sm, ax=ax, label="Stress", pad=0.1)
             cbar.ax.set_ylabel("Stress", fontweight="bold")
 
-        # Improve the layout
         plt.tight_layout()
 
         return ax, cbar
@@ -194,10 +257,21 @@ class Simulator:
         position_mask: Tensor,
         step: int,
     ) -> tuple[Tensor, Tensor, int]:
+        """
+        Optimize the energy of the system.
 
+        :param positions: Current positions of the rod
+        :param fracture_vector: Current fracture state
+        :param surface_energy_constants: Surface energy constants
+        :param position_mask: Mask for fixed positions
+        :param step: Current step number
+        :return: Optimized positions, final energy, and number of iterations
+        """
         total_energy_fct = torch.jit.trace(
             self.total_energy, (positions, fracture_vector, surface_energy_constants)
         )
+        if not callable(total_energy_fct):
+            raise TypeError("Somehow, the tracing went wrong")
         positions.requires_grad_(True)
         fracture_vector.requires_grad_(True)
         current_lr = self.config.learning_rate
@@ -205,11 +279,11 @@ class Simulator:
         for iteration in tqdm(range(self.config.max_iterations), leave=False):
             with torch.no_grad():
                 if positions.grad is not None:
-                    positions.grad.zero_()  # type: ignore
+                    positions.grad.zero_()
                 if fracture_vector.grad is not None:
-                    fracture_vector.grad.zero_()  # type: ignore
+                    fracture_vector.grad.zero_()
 
-            energy = total_energy_fct(  # type: ignore
+            energy = total_energy_fct(
                 positions, fracture_vector, surface_energy_constants
             )
             energy.backward()
@@ -219,8 +293,10 @@ class Simulator:
                     (positions.grad * (~position_mask)).cpu().numpy().flatten(),
                     ord=self.config.error_norm_p,
                 )
-                positions -= current_lr * positions.grad * (~position_mask)  # type: ignore
-                fracture_vector -= current_lr * fracture_vector.grad  # type: ignore
+                if positions.grad is None or fracture_vector.grad is None:
+                    raise TypeError("The gradients are None")
+                positions -= current_lr * positions.grad * (~position_mask)
+                fracture_vector -= current_lr * fracture_vector.grad
                 positions.data[position_mask] = positions[position_mask]
                 fracture_vector.clamp_(0, 1)
                 fractor_gradient_finished = (fracture_vector == 0) | (
@@ -250,6 +326,15 @@ class Simulator:
         surface_energy_constants: Tensor,
         time: float,
     ) -> float:
+        """
+        Calculate the energy derivative.
+
+        :param position: Current positions of the rod
+        :param fracture_vector: Current fracture state
+        :param surface_energy_constants: Surface energy constants
+        :param time: Current time
+        :return: Energy derivative
+        """
         def calculate_energy(time: Tensor) -> Tensor:
             first_position = torch.cat(
                 [torch.zeros((1, 1)), time.view(1, 1) * self.config.d], dim=0
@@ -271,9 +356,16 @@ class Simulator:
         time_tensor.requires_grad_(True)
         energy = calculate_energy(time_tensor)
         energy.backward()
-        return time_tensor.grad.item()  # type: ignore
+        if time_tensor.grad is None:
+            raise TypeError("The gradient is None")
+        return time_tensor.grad.item()
 
     def run_simulation(self) -> list[SimulationStepResult]:
+        """
+        Run the complete simulation.
+
+        :return: List of simulation step results
+        """
         plt.ion()
         ax, cbar = None, None
         positions = self.initialize_positions()
@@ -325,12 +417,15 @@ class Simulator:
         return simulation_step_results
 
     def calculate_ideal_breakage_time(self) -> int:
+        """
+        Calculate the ideal breakage time.
+
+        :return: Ideal breakage time
+        """
         minimal_constant = torch.min(self.initialize_surface_energy()).item()
-        # we should break whenever the stress is exactly the minimal constant.
         displacement_for_breakage = np.sqrt(minimal_constant / self.config.k_stretch)
         length_per_segment_for_breakage = self.config.L + displacement_for_breakage
         total_length = self.config.N * length_per_segment_for_breakage
-        # now use pythagoral to calculate the y-displacement
         y_displacement = np.sqrt(total_length**2 - self.config.W**2)
         breakage_time = y_displacement / (2 * self.config.d)
         return breakage_time
@@ -338,9 +433,16 @@ class Simulator:
     def interpolate_piecewise_static(
         self, simulation_step_results: list[SimulationStepResult], n_frames: int
     ) -> list[SimulationStepResult]:
+        """
+        Interpolate the simulation results for smooth animation.
+
+        :param simulation_step_results: List of simulation step results
+        :param n_frames: Number of frames for interpolation
+        :return: List of interpolated simulation step results
+        """
         surface_energy = self.initialize_surface_energy()
 
-        def get_new_animation_step(i) -> SimulationStepResult:
+        def get_new_animation_step(i: int) -> SimulationStepResult:
             animation_step_to_take = int(i / n_frames * len(simulation_step_results))
             next_animation_step_to_take = int(
                 (i + 1) / n_frames * len(simulation_step_results)
@@ -379,17 +481,27 @@ class Simulator:
         simulation_step_results: dict[str, list[SimulationStepResult]],
         start_time: float = 0,
         end_time: float = 1,
-        ax=None,
-        fig=None,
-        add_legend: bool=True,
-        color_map: dict[str, str] = None
-    ):
+        ax: axes.Axes | None = None,
+        add_legend: bool = True,
+        color_map: dict[str, str] | None = None
+    ) -> axes.Axes:
+        """
+        Plot the energy over time for multiple simulations.
+
+        :param simulation_step_results: Dictionary of simulation results
+        :param start_time: Start time for the x-axis
+        :param end_time: End time for the x-axis
+        :param ax: Matplotlib axes to plot on (optional)
+        :param fig: Matplotlib figure to plot on (optional)
+        :param add_legend: Whether to add a legend to the plot
+        :param color_map: Dictionary mapping simulation names to colors
+        :return: Updated axes and figure
+        """
         if ax is None:
             fig, ax = plt.subplots(figsize=(12, 8))
         
         ax.clear()
 
-        # Set up the plot style
         sns.set_style("whitegrid")
         sns.set_context("notebook", font_scale=1.2)
         ax.set_xlabel("$t$")
@@ -401,7 +513,7 @@ class Simulator:
             ax.plot(x_data, [result.energy for result in steps], label=r"$\delta = \frac{1}{" + name + r"}$", color=color)
         if add_legend:
             ax.legend()
-        return ax, fig
+        return ax
 
     @classmethod
     def plot_iteration_number(
@@ -410,16 +522,27 @@ class Simulator:
         start_time: float = 0,
         end_time: float = 1,
         x_resolution: int = 200,
-        ax=None,
-        fig=None,
-        add_legend: bool=True,
-        color_map: dict[str, str] = None
-    ):
+        ax: axes.Axes | None = None,
+        add_legend: bool = True,
+        color_map: dict[str, str] | None = None
+    ) -> axes.Axes:
+        """
+        Plot the number of iterations over time for multiple simulations.
+
+        :param simulation_step_results: Dictionary of simulation results
+        :param start_time: Start time for the x-axis
+        :param end_time: End time for the x-axis
+        :param x_resolution: Resolution of the x-axis
+        :param ax: Matplotlib axes to plot on (optional)
+        :param fig: Matplotlib figure to plot on (optional)
+        :param add_legend: Whether to add a legend to the plot
+        :param color_map: Dictionary mapping simulation names to colors
+        :return: Updated axes and figure
+        """
         if ax is None:
             fig, ax = plt.subplots(figsize=(12, 8))
         ax.clear()
 
-        # Set up the plot style
         sns.set_style("whitegrid")
         sns.set_context("notebook", font_scale=1.2)
         ax.set_xlabel("$t$")
@@ -439,7 +562,7 @@ class Simulator:
             )
         if add_legend:
             ax.legend()
-        return ax, fig
+        return ax
 
     @classmethod
     def plot_mu(
@@ -447,16 +570,26 @@ class Simulator:
         simulation_step_results: dict[str, list[SimulationStepResult]],
         start_time: float = 0,
         end_time: float = 1,
-        ax=None,
-        fig=None,
-        add_legend: bool=True,
-        color_map: dict[str, str] = None
-    ):
+        ax: axes.Axes | None = None,
+        add_legend: bool = True,
+        color_map: dict[str, str] | None = None
+    ) -> axes.Axes:
+        """
+        Plot the mu values over time for multiple simulations.
+
+        :param simulation_step_results: Dictionary of simulation results
+        :param start_time: Start time for the x-axis
+        :param end_time: End time for the x-axis
+        :param ax: Matplotlib axes to plot on (optional)
+        :param fig: Matplotlib figure to plot on (optional)
+        :param add_legend: Whether to add a legend to the plot
+        :param color_map: Dictionary mapping simulation names to colors
+        :return: Updated axes and figure
+        """
         if ax is None:
             fig, ax = plt.subplots(figsize=(12, 8))
         ax.clear()
 
-        # Set up the plot style
         sns.set_style("whitegrid")
         sns.set_context("notebook", font_scale=1.2)
         ax.set_xlabel("$t$")
@@ -474,7 +607,7 @@ class Simulator:
             )
         if add_legend:
             ax.legend()
-        return ax, fig
+        return ax
 
     @classmethod
     def plot_d(
@@ -482,16 +615,26 @@ class Simulator:
         simulation_step_results: dict[str, list[SimulationStepResult]],
         start_time: float = 0,
         end_time: float = 1,
-        ax=None,
-        fig=None,
-        add_legend: bool=True,
-        color_map: dict[str, str] = None
-    ):
+        ax: axes.Axes | None = None,
+        add_legend: bool = True,
+        color_map: dict[str, str] | None = None
+    ) -> axes.Axes:
+        """
+        Plot the d values over time for multiple simulations.
+
+        :param simulation_step_results: Dictionary of simulation results
+        :param start_time: Start time for the x-axis
+        :param end_time: End time for the x-axis
+        :param ax: Matplotlib axes to plot on (optional)
+        :param fig: Matplotlib figure to plot on (optional)
+        :param add_legend: Whether to add a legend to the plot
+        :param color_map: Dictionary mapping simulation names to colors
+        :return: Updated axes and figure
+        """
         if ax is None:
             fig, ax = plt.subplots(figsize=(12, 8))
         ax.clear()
 
-        # Set up the plot style
         sns.set_style("whitegrid")
         sns.set_context("notebook", font_scale=1.2)
         ax.set_xlabel("$t$")
@@ -503,77 +646,16 @@ class Simulator:
             ax.plot(x_data, [result.energy_gradient for result in steps], label=r"$\delta = \frac{1}{" + name + r"}$", color=color)
         if add_legend:
             ax.legend()
-        return ax, fig
+        return ax
 
-
-# New class for creating videos
-class RodSimulationVideo:
-    def __init__(
-        self,
-        config: SimulationConfig,
-        output_file: str = "rod_simulation.mp4",
-        clip_length: float = 5,
-        fps: float = 30,
-    ):
-        self.simulator = Simulator(config)
-        self.output_file = output_file
-        self.fps = fps
-        self.clip_length = clip_length
-
-    def create_video(self):
-        simulation_step_results = self.simulator.run_simulation()
-
-        fig, ax = plt.subplots(figsize=(12, 8))
-        max_stress = torch.min(self.simulator.initialize_surface_energy()).item() * 1.2
-
-        # Create the initial plot and colorbar
-        _, cbar = self.simulator.plot_rod(simulation_step_results[0], 0, max_stress, ax)
-        # Initialize the progress bar
-        self.progress_bar = tqdm(
-            total=self.fps * self.clip_length, desc="Creating video", unit="frame"
-        )
-
-        # Modify the animate function to update the progress bar
-        def animate(i):
-            animation_step_to_take = int(
-                i / self.fps / self.clip_length * self.simulator.config.time_steps
-            )
-            positions = simulation_step_results[
-                animation_step_to_take
-            ].positions.clone()
-            positions[1, 0] = (
-                (i) * self.simulator.config.d / self.fps / self.clip_length
-            )
-            positions[1, -1] = (
-                -(i) * self.simulator.config.d / self.fps / self.clip_length
-            )
-            self.simulator.plot_rod(
-                positions,
-                simulation_step_results[animation_step_to_take].breakages,
-                simulation_step_results[animation_step_to_take].iterations,
-                animation_step_to_take,
-                max_stress,
-                ax,
-                cbar,
-            )
-            self.progress_bar.update(1)  # Update the progress bar
-            return ax
-
-        # Wrap the animation in a try-finally block to ensure the progress bar is closed
-        try:
-            anim = animation.FuncAnimation(
-                fig,
-                animate,
-                frames=self.fps * self.clip_length,
-                interval=200,
-                blit=False,
-            )
-            anim.save(self.output_file, writer="ffmpeg", fps=self.fps)
-        finally:
-            self.progress_bar.close()  # Ensure the progress bar is closed
 
 
 def read_config() -> dict[str, SimulationConfig]:
+    """
+    Read the configuration file.
+
+    :return: Dictionary of simulation configurations
+    """
     with open(Path(__file__).parent / "configuration.json") as file:
         content = json.load(file)
     return {name: SimulationConfig(**dct) for name, dct in content.items()}
@@ -584,6 +666,11 @@ VIDEO_DIR = Path(__file__).parent / "videos"
 
 
 def do_all_simulations(overwrite: bool = False):
+    """
+    Run all simulations defined in the configuration file.
+
+    :param overwrite: Whether to overwrite existing simulation results
+    """
     RESULT_DIR.mkdir(exist_ok=True)
     configs = read_config()
     for i, (name, config) in enumerate(configs.items()):
@@ -598,16 +685,26 @@ def do_all_simulations(overwrite: bool = False):
             pickle.dump(simulation_results, file)
 
 
-def load_simulations(sort: bool=True) -> dict[str, list[SimulationStepResult]]:
+def load_simulations() -> dict[str, list[SimulationStepResult]]:
+    """
+    Load all simulation results.
+
+    :return: Dictionary of simulation results
+    """
     def load_file(path: Path) -> list[SimulationStepResult]:
         with open(path, "rb") as file:
             return pickle.load(file)
-     # We want the order to match those in the config
     configs = read_config()
     return {name: load_file(RESULT_DIR / name) for name in configs.keys()}
 
 
 def load_and_interpolate(total_frames: int) -> dict[str, list[SimulationStepResult]]:
+    """
+    Load and interpolate simulation results.
+
+    :param total_frames: Total number of frames for interpolation
+    :return: Dictionary of interpolated simulation results
+    """
     simulation_results = load_simulations()
     configs = read_config()
 
@@ -622,6 +719,13 @@ def load_and_interpolate(total_frames: int) -> dict[str, list[SimulationStepResu
 
 
 def create_videos(fps: int = 60, clip_length: float = 5, overwrite: bool = False):
+    """
+    Create videos of the simulations.
+
+    :param fps: Frames per second for the videos
+    :param clip_length: Length of the video clips in seconds
+    :param overwrite: Whether to overwrite existing videos
+    """
     VIDEO_DIR.mkdir(exist_ok=True)
     interpolated_frames = load_and_interpolate(int(fps * clip_length))
     configs = read_config()
@@ -634,14 +738,11 @@ def create_videos(fps: int = 60, clip_length: float = 5, overwrite: bool = False
         simulator = Simulator(configs[name])
         max_stress = torch.min(simulator.initialize_surface_energy()).item() * 1.2
 
-        # Create the initial plot and colorbar
         _, cbar = simulator.plot_rod(results[0], 0, max_stress, ax, fig)
-        # Initialize the progress bar
         progress_bar = tqdm(
             total=fps * clip_length, desc=f"Creating video {name}", unit="frame"
         )
 
-        # Modify the animate function to update the progress bar
         def animate(i):
             simulator.plot_rod(
                 results[i],
@@ -651,10 +752,9 @@ def create_videos(fps: int = 60, clip_length: float = 5, overwrite: bool = False
                 fig,
                 cbar,
             )
-            progress_bar.update(1)  # Update the progress bar
-            return ax
+            progress_bar.update(1)
+            return [ax]
 
-        # Wrap the animation in a try-finally block to ensure the progress bar is closed
         try:
             anim = animation.FuncAnimation(
                 fig,
@@ -665,28 +765,22 @@ def create_videos(fps: int = 60, clip_length: float = 5, overwrite: bool = False
             )
             anim.save(str(output_path), writer="ffmpeg", fps=fps)
         finally:
-            progress_bar.close()  # Ensure the progress bar is closed
+            progress_bar.close()
 
 
 def create_plots():
+    """
+    Create plots of the simulation results.
+    """
     OUTPUT_PATH = Path(__file__).parent / "plots"
     OUTPUT_PATH.mkdir(exist_ok=True)
     simulations = load_simulations()
     interpolated_simulations = load_and_interpolate(200)
 
-    # Define a color map for the simulations
     color_map = {name: color for name, color in zip(simulations.keys(), plt.get_cmap('tab10').colors)}
 
-    # Option 2: Using the 'viridis' colormap
-    # color_map = {name: color for name, color in zip(simulations.keys(), plt.get_cmap('viridis').colors)}
-
-    # Option 3: Using the 'plasma' colormap
-    # color_map = {name: color for name, color in zip(simulations.keys(), plt.get_cmap('plasma').colors)}
-
-    # Create the combined figure and axes
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(24, 16))
 
-    # Plot and save individual plots, reusing the axes
     def plot_and_save(ax, plot_func, data, filename):
         plot_func(data, ax=ax, color_map=color_map)
         individual_fig = plt.figure(figsize=(12, 8))
@@ -701,20 +795,15 @@ def create_plots():
     plot_and_save(ax3, Simulator.plot_mu, simulations, "mu")
     plot_and_save(ax4, Simulator.plot_d, interpolated_simulations, "d")
 
-    # Save the combined plot
     fig.tight_layout()
     fig.savefig(OUTPUT_PATH / "combined.svg")
     plt.close(fig)
 
 
 def main():
-    # config = SimulationConfig(time_steps=120)
-    # simulator = Simulator(config)
-    # print(f"Ideal breakage time: {simulator.calculate_ideal_breakage_time()}")
-
-    # # Create and save the video
-    # video_creator = RodSimulationVideo(config, "simulation_3.mp4")
-    # video_creator.create_video()
+    """
+    Main function to run the simulations, create videos, and plots.
+    """
     do_all_simulations(overwrite=False)
     create_videos()
     create_plots()
