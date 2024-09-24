@@ -10,6 +10,8 @@ packages = [{include = "quasistatic_evol"}]
 python = "^3.10"
 torch = "^2.4.1"
 tqdm = "^4.66.5"
+matplotlib = "^3.9.2"
+seaborn = "^0.13.2"
 
 
 [build-system]
