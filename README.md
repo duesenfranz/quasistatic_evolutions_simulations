@@ -1,4 +1,5 @@
 [![Run simulations and create videos](https://github.com/duesenfranz/quasistatic_evolutions_simulations/actions/workflows/run-simulations.yml/badge.svg)](https://github.com/duesenfranz/quasistatic_evolutions_simulations/actions/workflows/run-simulations.yml)
+
 # Simulations for Quasi-Static Evolutions
 
 An elastic rod is simulated as $n$ connected nodes.
@@ -19,23 +20,18 @@ After the system has reached a critical point, we iterate the procedure for the 
     <tbody>
         <tr>
             <td> 
-
-https://github.com/user-attachments/assets/20e84524-261e-4c28-a182-f090c5de341e
-
-</td>
-          <td>  
-
-https://github.com/user-attachments/assets/0183c5fa-589b-45df-893c-678b892c335f
-
-
-</td>
+                https://github.com/user-attachments/assets/20e84524-261e-4c28-a182-f090c5de341e
+            </td>
+            <td>  
+                https://github.com/user-attachments/assets/0183c5fa-589b-45df-893c-678b892c335f
+            </td>  
         </tr>
         <tr>
             <td colspan=2><img src="https://github.com/duesenfranz/quasistatic_evolutions_simulations/releases/download/rolling/energy_sums.png" width="100%"/></td>
         </tr>
         <tr>
             <td colspan=2><img src="https://github.com/duesenfranz/quasistatic_evolutions_simulations/releases/download/rolling/combined.png" width="100%"/></td>
-]        </tr>
+        </tr>
     </tbody>
 </table>
 
