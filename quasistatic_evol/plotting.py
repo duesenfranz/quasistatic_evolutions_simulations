@@ -262,8 +262,8 @@ def create_plots(output_path: Path):
     plt.close(individual_fig)
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 5), sharey=True)
-    plot_energy_sums(interpolated_simulations["240"], ax=axes[0])
-    plot_energy_sums(interpolated_simulations["15"], ax=axes[1])
+    plot_energy_sums(interpolated_simulations["15"], ax=axes[0])
+    plot_energy_sums(interpolated_simulations["240"], ax=axes[1])
     fig.tight_layout()
     fig.savefig(output_path / "energy_sums.svg") 
     fig.savefig(output_path / "energy_sums.png", dpi=300)   
