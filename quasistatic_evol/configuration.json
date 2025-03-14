@@ -1,14 +1,14 @@
 {
-  "250": {
-    "time_steps": 250
+  "240": {
+    "time_steps": 241
   },
   "60": {
-    "time_steps": 60
+    "time_steps": 61
   },
   "15": {
-    "time_steps": 15
+    "time_steps": 16
   },
   "5": {
-    "time_steps": 5
+    "time_steps": 6
   }
 }
