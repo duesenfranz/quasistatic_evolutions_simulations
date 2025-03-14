@@ -1,0 +1,64 @@
+name: Run simulations and create videeos
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-release-deploy:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    container:
+      image: ghcr.io/duesenfranz/gh_action_poetry
+      credentials:
+         username: duesenfranz
+         password: ${{  secrets.DOCKER_CONTAINER_REGISTRY_TOKEN }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Install poetry dependencies
+        run: |
+          poetry install
+      - name: Run simulations
+        run: |
+          poetry run python rod_simulator.py
+      - name: Create plots
+        run: |
+          poetry run python plotting.py
+      - name: Create videos
+        run: |
+          poetry run python create_videos.py
+
+        run: |
+            git config --global --add safe.directory '*'
+            echo "# Compiled Videos and Plots" > release_body.md
+            echo "" >> release_body.md
+
+      - name: Create or update the "rolling" release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "quasistatic_evol/plots/*.svg"
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: rolling
+          bodyFile: release_body.md
+          removeArtifacts: true
+      - name: Upload videos
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "quasistatic_evol/videos/*.mp4"
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: rolling
+          bodyFile: release_body.md
+          name: Rolling Release
+      - name: Update tag
+        uses: rickstaa/action-create-tag@v1
+        with:
+          tag: "rolling"
+          tag_exists_error: false
+          message: "Rolling release"
+          force_push_tag: true
+
