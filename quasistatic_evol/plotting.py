@@ -226,9 +226,6 @@ def create_plots(output_path: Path):
     Create plots of the simulation results.
     """
     interpolated_simulations = load_and_interpolate(96 * 5)
-    interpolated_simulations = {
-        key: interpolated_simulations[key] for key in ["240", "15"]
-    }
     plotter = Plotter(interpolated_simulations, None)
 
     # plot combined
