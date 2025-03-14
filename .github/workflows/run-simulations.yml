@@ -45,6 +45,14 @@ jobs:
           tag: rolling
           bodyFile: release_body.md
           removeArtifacts: true
+      - name: Upload png files
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "quasistatic_evol/plots/*.png"
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: rolling
+          bodyFile: release_body.md
       - name: Upload videos
         uses: ncipollo/release-action@v1
         with:
