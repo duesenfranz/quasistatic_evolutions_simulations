@@ -23,13 +23,13 @@ jobs:
           poetry install
       - name: Run simulations
         run: |
-          poetry run python rod_simulator.py
+          poetry run python quasistatic_evol/rod_simulator.py
       - name: Create plots
         run: |
-          poetry run python plotting.py
+          poetry run python quasistatic_evol/plotting.py
       - name: Create videos
         run: |
-          poetry run python create_videos.py
+          poetry run python quasistatic_evol/create_videos.py
 
       - name: Prepare release body
         run: |
