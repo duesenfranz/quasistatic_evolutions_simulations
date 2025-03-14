@@ -1,4 +1,5 @@
 *.png
 */simulation_results/*
+*.svg
 *.pyc
 *.DS_Store
