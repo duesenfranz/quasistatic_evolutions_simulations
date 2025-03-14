@@ -15,7 +15,7 @@ import seaborn as sns
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.animation as animation
 import os
-from typing import Tuple
+from typing import Literal, Tuple
 
 
 @dataclass
@@ -31,22 +31,28 @@ class SimulationConfig:
     learning_rate: float = 0.1
     decay_factor: float = 1
     min_learning_rate: float = 0.001
-    tolerance: float = 5e-5
+    tolerance: float = 5e-4
     max_iterations: int = 100000
     d: float = 5
     time_steps: int = 20
     plot_interval: int = N // 10
     error_norm_p: int = 2
 
+@dataclass
+class SystemState:
+    free_nodes: Tensor
+    breakages: Tensor
 
 @dataclass
 class SimulationStepResult:
-    energy_before_optimizing: float
+    energy_before_system_transition: float
     energy: float
     energy_gradient: float
-    positions: Tensor
-    breakages: Tensor
+    SystemState: SystemState
+    time: float
     iterations: int
+
+
 
 
 class Simulator:
@@ -61,10 +67,19 @@ class Simulator:
         self.seed = seed
         self.fig: figure.Figure | None = None
         self.ax: axes.Axes | None = None
+        self.surface_energy_constants = self.initialize_surface_energy()
+        self.free_rod_nodes_indices = [False] + [True] * (self.config.N - 2) + [False]
+        self.controlled_nodes_indices = [
+            not free for free in self.free_rod_nodes_indices
+        ]
+        initial_system_state = self.initialize_system_state()
+        self.get_energy_traced = torch.jit.trace(self.get_energy, [Tensor([0]), initial_system_state.free_nodes, initial_system_state.breakages])
+
 
     def initialize_surface_energy(self) -> Tensor:
         """
         Initialize the surface energy.
+        We add a small noise to the surface energy to break the symmetry.
 
         :return: Initialized surface energy
         """
@@ -75,48 +90,48 @@ class Simulator:
             (self.config.N - 1,),
         )
 
-    def initialize_positions(self) -> Tensor:
+    def initialize_system_state(self) -> SystemState:
         """
         Initialize the positions of the rod.
+        Initially, the rod is straight, with the nodes evenly spaced between 0 and W.
+        The outer points
 
-        :return: Initialized positions
+        :return: Initialized SystemState
         """
         x_positions = torch.linspace(0, self.config.W, self.config.N)
         y_positions = torch.zeros(self.config.N)
-        return torch.stack([x_positions, y_positions])
+        free_nodes =  torch.stack([x_positions, y_positions], dim=1)[ 1:-1, :]
+        breakages = torch.zeros(self.config.N - 1)
+        return SystemState(free_nodes, breakages)
 
-    def initialize_fracture(self) -> Tensor:
+    def assemble_rod(self, free_nodes: Tensor, controlled_nodes: Tensor) -> Tensor:
         """
-        Initialize the fracture vector.
+        Assemble the rod from the free and controlled nodes.
 
-        :return: Initialized fracture vector
+        :param free_nodes: Free nodes
+        :param controlled_nodes: Controlled nodes
+        :return: Assembled rod
         """
-        return torch.zeros(self.config.N - 1)
+        res = torch.empty((len(self.controlled_nodes_indices), free_nodes.shape[1]), dtype=free_nodes.dtype)
+        res[self.free_rod_nodes_indices] = free_nodes
+        res[self.controlled_nodes_indices] = controlled_nodes
+        return res
+    def get_controlled_nodes_position(self, time: Tensor | float) -> Tensor:
+        """
+        Get the position of the controlled nodes at a given time.
 
-    def compute_angles_from_positions(self, positions: Tensor) -> Tensor:
+        :param time: Time of shape (1,)
+        :return: Position of the controlled nodes
         """
-        Compute angles from positions.
-
-        :param positions: Current positions of the rod
-        :return: Computed angles
-        """
-        x_positions = positions[0]
-        y_positions = positions[1]
-        dx = x_positions[1:] - x_positions[:-1]
-        dy = y_positions[1:] - y_positions[:-1]
-        return torch.atan2(dy, dx)
-
-    def compute_surface_energy(
-        self, fracture_vector: Tensor, surface_energy_constants: Tensor
-    ) -> Tensor:
-        """
-        Compute the surface energy.
-
-        :param fracture_vector: Current fracture state
-        :param surface_energy_constants: Surface energy constants
-        :return: Computed surface energy
-        """
-        return torch.sum(fracture_vector * surface_energy_constants)
+        if not torch.is_tensor(time):
+            time = torch.tensor([time])
+        first_position = torch.cat(
+            [torch.zeros((1, 1)), time.view(1, 1) * self.config.d], dim=1
+        )
+        last_position = torch.cat(
+            [torch.ones((1, 1)) * self.config.W, -time.view(1, 1) * self.config.d], dim=1
+        )
+        return torch.cat([first_position, last_position], dim=0)
 
     def compute_stress_vector(
         self, positions: Tensor, fracture_vector: Tensor
@@ -124,12 +139,12 @@ class Simulator:
         """
         Compute the stress vector.
 
-        :param positions: Current positions of the rod
+        :param positions: Current positions of the full rod
         :param fracture_vector: Current fracture state
         :return: Computed stress vector
         """
-        x_positions = positions[0]
-        y_positions = positions[1]
+        x_positions = positions[:, 0]
+        y_positions = positions[:, 1]
         dx = x_positions[1:] - x_positions[:-1]
         dy = y_positions[1:] - y_positions[:-1]
         distances = torch.sqrt(dx**2 + dy**2)
@@ -143,64 +158,148 @@ class Simulator:
         """
         Compute the elastic energy.
 
-        :param positions: Current positions of the rod
+        :param positions: Current positions of the full rod
         :param fracture_vector: Current fracture state
         :return: Computed elastic energy
         """
         stress = self.compute_stress_vector(positions, fracture_vector)
         return torch.sum(stress)
 
-    def total_energy(
-        self,
-        positions: Tensor,
-        fracture_vector: Tensor,
-        surface_energy_constants: Tensor,
-    ) -> Tensor:
+    def compute_surface_energy(self, fracture_vector: Tensor) -> Tensor:
         """
-        Compute the total energy of the system.
+        Compute the surface energy.
 
-        :param positions: Current positions of the rod
         :param fracture_vector: Current fracture state
         :param surface_energy_constants: Surface energy constants
-        :return: Total energy of the system
+        :return: Computed surface energy
         """
-        surface_energy = self.compute_surface_energy(
-            fracture_vector, surface_energy_constants
-        )
-        elastic_energy = self.compute_elastic_energy(positions, fracture_vector)
-        return surface_energy + elastic_energy
+        return torch.sum(fracture_vector * self.surface_energy_constants)
 
-    def plot_rod(
+    def get_energy(self, time: Tensor, free_nodes: Tensor, breakages: Tensor) -> Tensor:
+        """
+        Compute the energy of the system.
+
+        :param time: Time of shape (1)"
+        :param free_nodes: Free nodes of shape (N-2, 2)
+        :param breakages: Breakages of shape (N-1,)
+        """
+        controlled_nodes_position = self.get_controlled_nodes_position(time)
+        rod = self.assemble_rod(free_nodes, controlled_nodes_position)
+        return self.compute_surface_energy(
+            breakages
+        ) + self.compute_elastic_energy(rod, breakages)
+
+    def transition_system_gradient_descent(
         self,
-        simulation_step_result: SimulationStepResult,
-        step: int,
-        max_stress: float,
-        ax: axes.Axes | None = None,
-        fig: figure.Figure | None = None,
-        cbar: colorbar.Colorbar | None = None,
-    ) -> tuple[axes.Axes, colorbar.Colorbar | None]:
+        time: Tensor,
+        initial_system_state: SystemState,
+    ) -> tuple[SystemState, Tensor, int]:
         """
-        Plot the rod configuration.
-
-        :param simulation_step_result: Result of the current simulation step
-        :param step: Current step number
-        :param max_stress: Maximum stress for color scaling
-        :param ax: Matplotlib axes to plot on (optional)
-        :param fig: Matplotlib figure to plot on (optional)
-        :param cbar: Existing colorbar (optional)
-        :return: Updated axes and colorbar
+        Let the system transition using gradient descent until it lands on a critical point.
+        
+        :param time: Time of shape (1,)
+        :param initial_system_state: Initial system state
+        :return: Final positions, final energy, and number of iterations
         """
-        x_positions = simulation_step_result.positions[0].detach().cpu().numpy()
-        y_positions = simulation_step_result.positions[1].detach().cpu().numpy()
-        stress = (
-            self.compute_stress_vector(
-                simulation_step_result.positions, simulation_step_result.breakages
-            )
-            .detach()
-            .cpu()
-            .numpy()
+        if not callable(self.get_energy_traced):
+            raise TypeError("Somehow, the tracing went wrong")
+        system_state = SystemState(
+            initial_system_state.free_nodes.clone(),
+            initial_system_state.breakages.clone(),
         )
+        system_state.free_nodes.requires_grad_(True)
+        system_state.breakages.requires_grad_(True)
+        system_state.free_nodes.retain_grad()
+        system_state.breakages.retain_grad()
+        current_lr = self.config.learning_rate
 
+        for iteration in tqdm(range(self.config.max_iterations), leave=False):
+            with torch.no_grad():
+                if system_state.free_nodes.grad is not None:
+                    system_state.free_nodes.grad.zero_()
+                if system_state.breakages.grad is not None:
+                    system_state.breakages.grad.zero_()
+
+            energy = self.get_energy_traced(time, system_state.free_nodes, system_state.breakages)
+            energy.backward()  # type: ignore
+
+            with torch.no_grad():
+                if system_state.free_nodes.grad is None or system_state.breakages.grad is None:
+                    raise TypeError("The gradients are None")
+                gradient_norm = np.linalg.norm(
+                    (system_state.free_nodes.grad).cpu().numpy().flatten(),
+                    ord=self.config.error_norm_p,
+                )
+                system_state.free_nodes -= current_lr * system_state.free_nodes.grad
+                system_state.breakages -= current_lr * system_state.breakages.grad
+                system_state.breakages.clamp_(0, 1)
+                fractor_gradient_finished = (system_state.breakages == 0) | (
+                    system_state.breakages == 1
+                )
+
+                if fractor_gradient_finished.all() and (
+                    gradient_norm < self.config.tolerance
+                ):
+                    break
+
+            current_lr = max(
+                current_lr * self.config.decay_factor, self.config.min_learning_rate
+            )
+
+        else:
+            print("Maximum iterations reached without convergence.")
+            print(f"Final Gradient Norm: {gradient_norm}")
+            print(f"Fracture vector: {system_state.breakages}")
+
+        return system_state, energy.detach(), iteration
+
+    def calculate_energy_time_derivative(
+            self,
+            time: Tensor,
+            system_state: SystemState,
+    ) -> Tensor:
+        """
+        Calculate the energy time derivative.
+
+        :param time: Time of shape (1,)
+        :param system_state: System state
+        :return: Energy time derivative
+        """
+        if not callable(self.get_energy_traced):
+            raise TypeError("Somehow, the tracing went wrong")
+        time.requires_grad_(True)
+        
+        if time.grad is not None:
+            time.grad.zero_()
+        energy = self.get_energy_traced(time, system_state.free_nodes, system_state.breakages)
+        energy.backward()  # type: ignore
+        return time.grad  # type: ignore
+
+    def plot_simulation_step(
+        self,
+        system_state: SystemState,
+        time: Tensor | float,
+        energy: float,
+        max_stress: float,
+        ax: axes.Axes | None,
+        fig: figure.Figure | None,
+        cbar: colorbar.Colorbar | None,
+    ) -> Tuple[axes.Axes, colorbar.Colorbar]:
+        """
+        Plot the simulation step.
+
+        :param system_state: System state
+        :param time: Time of shape (1,)
+        :param energy: Energy of the system
+        :param max_stress: Maximum stress
+        :param ax: Axes
+        :param fig: Figure
+        :param cbar: Colorbar
+        :return: Axes and Colorbar
+        """
+        full_rod = self.assemble_rod(system_state.free_nodes, self.get_controlled_nodes_position(time))
+        stress = self.compute_stress_vector(full_rod, system_state.breakages).detach().cpu().numpy()
+        full_rod = full_rod.detach().cpu().numpy()
         if ax is None or fig is None:
             if self.fig is None or self.ax is None:
                 self.fig, self.ax = plt.subplots(figsize=(12, 8))
@@ -215,22 +314,23 @@ class Simulator:
         n_bins = 100
         cmap = LinearSegmentedColormap.from_list("custom", colors, N=n_bins)
 
-        for i in range(len(x_positions) - 1):
-            if simulation_step_result.breakages[i] == 0:
+
+        for i in range(len(full_rod) - 1):
+            if system_state.breakages[i] == 0:
                 ax.plot(
-                    [x_positions[i], x_positions[i + 1]],
-                    [y_positions[i], y_positions[i + 1]],
+                    [full_rod[i,0], full_rod[i + 1, 0]],
+                    [full_rod[i, 1], full_rod[i + 1, 1]],
                     color=cmap(stress[i] / max_stress),
                     linewidth=2.5,
                     alpha=0.8,
                 )
 
-        ax.scatter(x_positions, y_positions, color="#2c3e50", s=30, zorder=5)
+        ax.scatter(full_rod[:, 0], full_rod[:, 1], color="#2c3e50", s=30, zorder=5)
 
         ax.set_xlabel("X Position", fontweight="bold")
         ax.set_ylabel("Y Position", fontweight="bold")
         ax.set_title(
-            f"Rod Configuration at Step {step}, Iteration {simulation_step_result.iterations}",
+            f"Rod Configuration",
             fontweight="bold",
             fontsize=14,
         )
@@ -249,404 +349,81 @@ class Simulator:
 
         return ax, cbar
 
-    def optimize_energy(
-        self,
-        positions: Tensor,
-        fracture_vector: Tensor,
-        surface_energy_constants: Tensor,
-        position_mask: Tensor,
-        step: int,
-    ) -> tuple[Tensor, Tensor, int]:
+    
+    def run_simulation(self, callback: Literal["plot","none"]="plot") -> list[SimulationStepResult]:
         """
-        Optimize the energy of the system.
+        Run the simulation.
 
-        :param positions: Current positions of the rod
-        :param fracture_vector: Current fracture state
-        :param surface_energy_constants: Surface energy constants
-        :param position_mask: Mask for fixed positions
-        :param step: Current step number
-        :return: Optimized positions, final energy, and number of iterations
+        :return: List of SimulationStepResult
         """
-        total_energy_fct = torch.jit.trace(
-            self.total_energy, (positions, fracture_vector, surface_energy_constants)
-        )
-        if not callable(total_energy_fct):
-            raise TypeError("Somehow, the tracing went wrong")
-        positions.requires_grad_(True)
-        fracture_vector.requires_grad_(True)
-        current_lr = self.config.learning_rate
-
-        for iteration in tqdm(range(self.config.max_iterations), leave=False):
-            with torch.no_grad():
-                if positions.grad is not None:
-                    positions.grad.zero_()
-                if fracture_vector.grad is not None:
-                    fracture_vector.grad.zero_()
-
-            energy = total_energy_fct(
-                positions, fracture_vector, surface_energy_constants
-            )
-            energy.backward()
-
-            with torch.no_grad():
-                gradient_norm = np.linalg.norm(
-                    (positions.grad * (~position_mask)).cpu().numpy().flatten(),
-                    ord=self.config.error_norm_p,
-                )
-                if positions.grad is None or fracture_vector.grad is None:
-                    raise TypeError("The gradients are None")
-                positions -= current_lr * positions.grad * (~position_mask)
-                fracture_vector -= current_lr * fracture_vector.grad
-                positions.data[position_mask] = positions[position_mask]
-                fracture_vector.clamp_(0, 1)
-                fractor_gradient_finished = (fracture_vector == 0) | (
-                    fracture_vector == 1
-                )
-
-                if fractor_gradient_finished.all() and (
-                    gradient_norm < self.config.tolerance
-                ):
-                    break
-
-            current_lr = max(
-                current_lr * self.config.decay_factor, self.config.min_learning_rate
-            )
-
-        else:
-            print("Maximum iterations reached without convergence.")
-            print(f"Final Gradient Norm: {gradient_norm}")
-            print(f"Fracture vector: {fracture_vector}")
-
-        return positions.detach(), energy.detach(), iteration
-
-    def calculate_energy_derivative(
-        self,
-        position: Tensor,
-        fracture_vector: Tensor,
-        surface_energy_constants: Tensor,
-        time: float,
-    ) -> float:
-        """
-        Calculate the energy derivative.
-
-        :param position: Current positions of the rod
-        :param fracture_vector: Current fracture state
-        :param surface_energy_constants: Surface energy constants
-        :param time: Current time
-        :return: Energy derivative
-        """
-        def calculate_energy(time: Tensor) -> Tensor:
-            first_position = torch.cat(
-                [torch.zeros((1, 1)), time.view(1, 1) * self.config.d], dim=0
-            )
-            last_position = torch.cat(
-                [torch.zeros((1, 1)), -time.view(1, 1) * self.config.d], dim=0
-            )
-            positions = torch.cat(
-                [first_position, position[:, 1:-1], last_position], dim=1
-            )
-            energy = self.total_energy(
-                positions=positions,
-                fracture_vector=fracture_vector,
-                surface_energy_constants=surface_energy_constants,
-            )
-            return energy
-
-        time_tensor = torch.from_numpy(np.array(time))
-        time_tensor.requires_grad_(True)
-        energy = calculate_energy(time_tensor)
-        energy.backward()
-        if time_tensor.grad is None:
-            raise TypeError("The gradient is None")
-        return time_tensor.grad.item()
-
-    def run_simulation(self) -> list[SimulationStepResult]:
-        """
-        Run the complete simulation.
-
-        :return: List of simulation step results
-        """
+        
         plt.ion()
         ax, cbar = None, None
-        positions = self.initialize_positions()
-        fracture_vector = self.initialize_fracture()
-        surface_energy_constants = self.initialize_surface_energy()
-        max_stress = torch.min(surface_energy_constants).item() * 1.2
+        time = torch.linspace(0, 1, self.config.time_steps)
+        current_system_state = self.initialize_system_state()
+        max_stress = torch.min(self.surface_energy_constants).item() * 1.2
 
-        simulation_step_results: list[SimulationStepResult] = []
-
-        for n in tqdm(range(self.config.time_steps)):
-            with torch.no_grad():
-                positions[1, 0] = (n) * self.config.d / self.config.time_steps
-                positions[1, -1] = -(n) * self.config.d / self.config.time_steps
-
-            position_mask = torch.zeros_like(positions, dtype=torch.bool)
-            position_mask[:, 0] = True
-            position_mask[:, -1] = True
-            original_energy = self.total_energy(
-                positions=positions,
-                fracture_vector=fracture_vector,
-                surface_energy_constants=surface_energy_constants,
+        simulation_results = []
+        iterator =  tqdm(time)
+        for t in iterator:
+            energy_before = self.get_energy(t, current_system_state.free_nodes, current_system_state.breakages)
+            current_system_state, energy, iterations = self.transition_system_gradient_descent(
+                t, current_system_state
             )
-            energy_derivative = self.calculate_energy_derivative(
-                position=positions,
-                fracture_vector=fracture_vector,
-                surface_energy_constants=surface_energy_constants,
-                time=n / self.config.time_steps,
+            iterator.set_description(f"Time: {t.item():.2f}, Iterations: {iterations}")
+            energy_float = energy.item()
+            energy_gradient = self.calculate_energy_time_derivative(t, current_system_state)
+            simulation_results.append(
+                SimulationStepResult(
+                    energy_before_system_transition=energy_before.item(),
+                    energy=energy_float,
+                    energy_gradient=energy_gradient.item(),
+                    SystemState=current_system_state,
+                    time=t.item(),
+                    iterations=iterations,
+                )
             )
+            if callback == "plot":
+                ax, cbar = self.plot_simulation_step(
+                    current_system_state, t, energy_float, max_stress, ax, self.fig, cbar
+                )
+                plt.draw()
+                plt.pause(0.1)
+        return simulation_results
 
-            optimized_positions, final_energy, iterations = self.optimize_energy(
-                positions, fracture_vector, surface_energy_constants, position_mask, n
-            )
-
-            result = SimulationStepResult(
-                energy_gradient=energy_derivative,
-                energy_before_optimizing=original_energy.item(),
-                energy=final_energy.item(),
-                iterations=iterations,
-                positions=optimized_positions.clone(),
-                breakages=fracture_vector.clone(),
-            )
-            ax, cbar = self.plot_rod(result, n, max_stress, ax, self.fig, cbar)
-            plt.draw()
-            plt.pause(0.2)
-            simulation_step_results.append(result)
-
-        plt.ioff()
-
-        return simulation_step_results
-
-    def calculate_ideal_breakage_time(self) -> int:
+    def fill_up_simulation(self, simulation_results: list[SimulationStepResult], factor: int):
         """
-        Calculate the ideal breakage time.
+        Fill up the simulation results.
 
-        :return: Ideal breakage time
+        :param simulation_results: Simulation results
+        :param factor: Factor to fill up
+        :return: Filled up simulation results
         """
-        minimal_constant = torch.min(self.initialize_surface_energy()).item()
-        displacement_for_breakage = np.sqrt(minimal_constant / self.config.k_stretch)
-        length_per_segment_for_breakage = self.config.L + displacement_for_breakage
-        total_length = self.config.N * length_per_segment_for_breakage
-        y_displacement = np.sqrt(total_length**2 - self.config.W**2)
-        breakage_time = y_displacement / (2 * self.config.d)
-        return breakage_time
-
-    def interpolate_piecewise_static(
-        self, simulation_step_results: list[SimulationStepResult], n_frames: int
-    ) -> list[SimulationStepResult]:
-        """
-        Interpolate the simulation results for smooth animation.
-
-        :param simulation_step_results: List of simulation step results
-        :param n_frames: Number of frames for interpolation
-        :return: List of interpolated simulation step results
-        """
-        surface_energy = self.initialize_surface_energy()
-
-        def get_new_animation_step(i: int) -> SimulationStepResult:
-            animation_step_to_take = int(i / n_frames * len(simulation_step_results))
-            next_animation_step_to_take = int(
-                (i + 1) / n_frames * len(simulation_step_results)
-            )
-            relevant_result = simulation_step_results[animation_step_to_take]
-            positions = relevant_result.positions.clone()
-            positions[1, 0] = (i) * self.config.d / n_frames
-            positions[1, -1] = -(i) * self.config.d / n_frames
-            energy = self.total_energy(
-                positions, relevant_result.breakages, surface_energy
-            )
-            if next_animation_step_to_take != animation_step_to_take:
-                original_energy = relevant_result.energy_before_optimizing
-            else:
-                original_energy = energy.item()
-            energy_derivative = self.calculate_energy_derivative(
-                position=positions,
-                fracture_vector=relevant_result.breakages,
-                surface_energy_constants=surface_energy,
-                time=i / n_frames,
-            )
-            return SimulationStepResult(
-                energy_gradient=energy_derivative,
-                energy_before_optimizing=original_energy,
-                energy=energy.item(),
-                positions=positions,
-                breakages=relevant_result.breakages,
-                iterations=relevant_result.iterations,
-            )
-
-        return [get_new_animation_step(i) for i in range(n_frames)]
-
-    @classmethod
-    def plot_energies(
-        cls,
-        simulation_step_results: dict[str, list[SimulationStepResult]],
-        start_time: float = 0,
-        end_time: float = 1,
-        ax: axes.Axes | None = None,
-        add_legend: bool = True,
-        color_map: dict[str, str] | None = None
-    ) -> axes.Axes:
-        """
-        Plot the energy over time for multiple simulations.
-
-        :param simulation_step_results: Dictionary of simulation results
-        :param start_time: Start time for the x-axis
-        :param end_time: End time for the x-axis
-        :param ax: Matplotlib axes to plot on (optional)
-        :param fig: Matplotlib figure to plot on (optional)
-        :param add_legend: Whether to add a legend to the plot
-        :param color_map: Dictionary mapping simulation names to colors
-        :return: Updated axes and figure
-        """
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(12, 8))
-        
-        ax.clear()
-
-        sns.set_style("whitegrid")
-        sns.set_context("notebook", font_scale=1.2)
-        ax.set_xlabel("$t$")
-        ax.set_ylabel("$\mathcal{E}_t(u^\delta)$")
-        ax.set_title("Total Energy Over Time")
-        for name, steps in simulation_step_results.items():
-            x_data = np.linspace(start_time, end_time, len(steps), endpoint=False)
-            color = color_map[name] if color_map and name in color_map else None
-            ax.plot(x_data, [result.energy for result in steps], label=r"$\delta = \frac{1}{" + name + r"}$", color=color)
-        if add_legend:
-            ax.legend()
-        return ax
-
-    @classmethod
-    def plot_iteration_number(
-        cls,
-        simulation_step_results: dict[str, list[SimulationStepResult]],
-        start_time: float = 0,
-        end_time: float = 1,
-        x_resolution: int = 200,
-        ax: axes.Axes | None = None,
-        add_legend: bool = True,
-        color_map: dict[str, str] | None = None
-    ) -> axes.Axes:
-        """
-        Plot the number of iterations over time for multiple simulations.
-
-        :param simulation_step_results: Dictionary of simulation results
-        :param start_time: Start time for the x-axis
-        :param end_time: End time for the x-axis
-        :param x_resolution: Resolution of the x-axis
-        :param ax: Matplotlib axes to plot on (optional)
-        :param fig: Matplotlib figure to plot on (optional)
-        :param add_legend: Whether to add a legend to the plot
-        :param color_map: Dictionary mapping simulation names to colors
-        :return: Updated axes and figure
-        """
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(12, 8))
-        ax.clear()
-
-        sns.set_style("whitegrid")
-        sns.set_context("notebook", font_scale=1.2)
-        ax.set_xlabel("$t$")
-        ax.set_ylabel("Number of Iterations")
-        ax.set_title("Number of Iterations Until Convergence")
-        for name, steps in simulation_step_results.items():
-            x_data = np.linspace(start_time, end_time, len(steps), endpoint=False)
-            color = color_map[name] if color_map and name in color_map else None
-            ax.plot(
-                x_data,
-                [result.iterations for result in steps],
-                label=r"$\delta = \frac{1}{" + name + r"}$",
-                drawstyle="steps-mid",
-                marker="o",
-                markersize=50 / len(steps),
-                color=color
-            )
-        if add_legend:
-            ax.legend()
-        return ax
-
-    @classmethod
-    def plot_mu(
-        cls,
-        simulation_step_results: dict[str, list[SimulationStepResult]],
-        start_time: float = 0,
-        end_time: float = 1,
-        ax: axes.Axes | None = None,
-        add_legend: bool = True,
-        color_map: dict[str, str] | None = None
-    ) -> axes.Axes:
-        """
-        Plot the mu values over time for multiple simulations.
-
-        :param simulation_step_results: Dictionary of simulation results
-        :param start_time: Start time for the x-axis
-        :param end_time: End time for the x-axis
-        :param ax: Matplotlib axes to plot on (optional)
-        :param fig: Matplotlib figure to plot on (optional)
-        :param add_legend: Whether to add a legend to the plot
-        :param color_map: Dictionary mapping simulation names to colors
-        :return: Updated axes and figure
-        """
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(12, 8))
-        ax.clear()
-
-        sns.set_style("whitegrid")
-        sns.set_context("notebook", font_scale=1.2)
-        ax.set_xlabel("$t$")
-        ax.set_ylabel(r"$\mu^\delta(\{t\})$")
-        ax.set_title(r"$\mu^\delta$")
-        for name, steps in simulation_step_results.items():
-            x_data = np.linspace(start_time, end_time, len(steps), endpoint=False)
-            color = color_map[name] if color_map and name in color_map else None
-            ax.vlines(
-                x_data,
-                ymax=0,
-                ymin=[result.energy - result.energy_before_optimizing for result in steps],
-                label=r"$\delta = \frac{1}{" + name + r"}$",
-                colors=color,
-            )
-        if add_legend:
-            ax.legend()
-        return ax
-
-    @classmethod
-    def plot_d(
-        cls,
-        simulation_step_results: dict[str, list[SimulationStepResult]],
-        start_time: float = 0,
-        end_time: float = 1,
-        ax: axes.Axes | None = None,
-        add_legend: bool = True,
-        color_map: dict[str, str] | None = None
-    ) -> axes.Axes:
-        """
-        Plot the d values over time for multiple simulations.
-
-        :param simulation_step_results: Dictionary of simulation results
-        :param start_time: Start time for the x-axis
-        :param end_time: End time for the x-axis
-        :param ax: Matplotlib axes to plot on (optional)
-        :param fig: Matplotlib figure to plot on (optional)
-        :param add_legend: Whether to add a legend to the plot
-        :param color_map: Dictionary mapping simulation names to colors
-        :return: Updated axes and figure
-        """
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(12, 8))
-        ax.clear()
-
-        sns.set_style("whitegrid")
-        sns.set_context("notebook", font_scale=1.2)
-        ax.set_xlabel("$t$")
-        ax.set_ylabel(r"$\mathcal{D}^\delta(t)$")
-        ax.set_title(r"$\mathcal{D}^\delta$")
-        for name, steps in simulation_step_results.items():
-            x_data = np.linspace(start_time, end_time, len(steps), endpoint=False)
-            color = color_map[name] if color_map and name in color_map else None
-            ax.plot(x_data, [result.energy_gradient for result in steps], label=r"$\delta = \frac{1}{" + name + r"}$", color=color)
-        if add_legend:
-            ax.legend()
-        return ax
+        if not callable(self.get_energy_traced):
+            raise TypeError("Somehow, the tracing went wrong")
+        filled_simulation_results = []
+        for i, result in enumerate(simulation_results):
+            filled_simulation_results.append(result)
+            if i < len(simulation_results) - 1:
+                for j in range(1, factor):
+                    time = result.time + j * (simulation_results[i + 1].time - result.time) / factor
+                    new_energy = self.get_energy_traced(
+                        torch.tensor([time]), result.SystemState.free_nodes, result.SystemState.breakages
+                    )
+                    new_energy_gradient = self.calculate_energy_time_derivative(
+                        torch.tensor([time]), result.SystemState
+                    )
+                    filled_simulation_results.append(
+                        SimulationStepResult(
+                            energy_before_system_transition=new_energy.item(),
+                            energy=new_energy.item(),
+                            energy_gradient=new_energy_gradient.item(),
+                            SystemState=result.SystemState,
+                            time=time,
+                            iterations=0,
+                        )
+                    )
+        return filled_simulation_results
 
 
 
@@ -665,7 +442,7 @@ RESULT_DIR = Path(__file__).parent / "simulation_results"
 VIDEO_DIR = Path(__file__).parent / "videos"
 
 
-def do_all_simulations(overwrite: bool = False):
+def do_all_simulations(overwrite: bool = False, plot: bool = True):
     """
     Run all simulations defined in the configuration file.
 
@@ -680,7 +457,7 @@ def do_all_simulations(overwrite: bool = False):
             continue
         simulator = Simulator(config)
         print(f"Simulating {i}/{len(configs)}: {name}...")
-        simulation_results = simulator.run_simulation()
+        simulation_results = simulator.run_simulation(callback="plot" if plot else "none")
         with open(result_path, "wb") as file:
             pickle.dump(simulation_results, file)
 
@@ -711,14 +488,16 @@ def load_and_interpolate(total_frames: int) -> dict[str, list[SimulationStepResu
     def get_interpolated(name: str) -> list[SimulationStepResult]:
         simulation_result = simulation_results[name]
         simulator = Simulator(config=configs[name])
-        return simulator.interpolate_piecewise_static(
-            simulation_result, n_frames=total_frames
+        if total_frames % (len(simulation_result) - 1) != 0:
+            raise ValueError("Total frames must be a multiple of the simulation length")
+        return simulator.fill_up_simulation(
+            simulation_result, factor=total_frames // (len(simulation_result) - 1)
         )
 
     return {name: get_interpolated(name) for name in configs.keys()}
 
 
-def create_videos(fps: int = 60, clip_length: float = 5, overwrite: bool = False):
+def create_videos(fps: int = 96, clip_length: float = 5, overwrite: bool = False):
     """
     Create videos of the simulations.
 
@@ -738,15 +517,14 @@ def create_videos(fps: int = 60, clip_length: float = 5, overwrite: bool = False
         simulator = Simulator(configs[name])
         max_stress = torch.min(simulator.initialize_surface_energy()).item() * 1.2
 
-        _, cbar = simulator.plot_rod(results[0], 0, max_stress, ax, fig)
+        _, cbar = simulator.plot_simulation_step(results[0].SystemState, results[0].time, results[0].energy, max_stress, ax, fig, cbar=None)
         progress_bar = tqdm(
             total=fps * clip_length, desc=f"Creating video {name}", unit="frame"
         )
 
         def animate(i):
-            simulator.plot_rod(
-                results[i],
-                0,
+            simulator.plot_simulation_step(
+                results[i].SystemState, results[i].time, results[i].energy,
                 max_stress,
                 ax,
                 fig,
@@ -768,45 +546,13 @@ def create_videos(fps: int = 60, clip_length: float = 5, overwrite: bool = False
             progress_bar.close()
 
 
-def create_plots():
-    """
-    Create plots of the simulation results.
-    """
-    OUTPUT_PATH = Path(__file__).parent / "plots"
-    OUTPUT_PATH.mkdir(exist_ok=True)
-    simulations = load_simulations()
-    interpolated_simulations = load_and_interpolate(200)
-
-    color_map = {name: color for name, color in zip(simulations.keys(), plt.get_cmap('tab10').colors)}
-
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(24, 16))
-
-    def plot_and_save(ax, plot_func, data, filename):
-        plot_func(data, ax=ax, color_map=color_map)
-        individual_fig = plt.figure(figsize=(12, 8))
-        individual_ax = individual_fig.add_subplot(111)
-        plot_func(data, ax=individual_ax, color_map=color_map)
-        individual_fig.savefig(OUTPUT_PATH / f"{filename}.svg")
-        individual_fig.savefig(OUTPUT_PATH / f"{filename}.png")
-        plt.close(individual_fig)
-
-    plot_and_save(ax1, Simulator.plot_energies, interpolated_simulations, "energies")
-    plot_and_save(ax2, Simulator.plot_iteration_number, simulations, "iterations")
-    plot_and_save(ax3, Simulator.plot_mu, simulations, "mu")
-    plot_and_save(ax4, Simulator.plot_d, interpolated_simulations, "d")
-
-    fig.tight_layout()
-    fig.savefig(OUTPUT_PATH / "combined.svg")
-    plt.close(fig)
-
 
 def main():
     """
     Main function to run the simulations, create videos, and plots.
     """
-    do_all_simulations(overwrite=False)
-    create_videos()
-    create_plots()
+    do_all_simulations(overwrite=True, plot=False)
+    # create_videos()
 
 
 if __name__ == "__main__":
