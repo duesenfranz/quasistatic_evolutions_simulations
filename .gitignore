@@ -1,3 +1,4 @@
 *.png
 */simulation_results/*
 *.pyc
+*.DS_Store
