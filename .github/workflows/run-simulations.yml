@@ -31,8 +31,8 @@ jobs:
         run: |
           poetry run python create_videos.py
 
+      - name: Prepare release body
         run: |
-            git config --global --add safe.directory '*'
             echo "# Compiled Videos and Plots" > release_body.md
             echo "" >> release_body.md
 
