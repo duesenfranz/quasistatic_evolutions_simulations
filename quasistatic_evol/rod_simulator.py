@@ -281,9 +281,10 @@ class Simulator:
         time: Tensor | float,
         energy: float,
         max_stress: float,
-        ax: axes.Axes | None,
-        fig: figure.Figure | None,
-        cbar: colorbar.Colorbar | None,
+        ax: axes.Axes | None = None,
+        fig: figure.Figure | None = None,
+        cbar: colorbar.Colorbar | None = None,
+        title: str | None = "Rod Configuration",
     ) -> Tuple[axes.Axes, colorbar.Colorbar]:
         """
         Plot the simulation step.
@@ -295,6 +296,7 @@ class Simulator:
         :param ax: Axes
         :param fig: Figure
         :param cbar: Colorbar
+        :param title: Title of the plot
         :return: Axes and Colorbar
         """
         full_rod = self.assemble_rod(system_state.free_nodes, self.get_controlled_nodes_position(time))
@@ -325,15 +327,14 @@ class Simulator:
                     alpha=0.8,
                 )
 
-        ax.scatter(full_rod[:, 0], full_rod[:, 1], color="#2c3e50", s=30, zorder=5)
+        ax.scatter(full_rod[:, 0], full_rod[:, 1], color="#2c3e50", s=10, zorder=5)
 
-        ax.set_xlabel("X Position", fontweight="bold")
-        ax.set_ylabel("Y Position", fontweight="bold")
-        ax.set_title(
-            f"Rod Configuration",
-            fontweight="bold",
-            fontsize=14,
-        )
+        if title:
+            ax.set_title(
+                title,
+                fontweight="bold",
+                fontsize=14,
+            )
 
         ax.set_ylim(-self.config.d, self.config.d)
 
@@ -344,8 +345,11 @@ class Simulator:
             sm.set_array([])
             cbar = fig.colorbar(sm, ax=ax, label="Stress", pad=0.1)
             cbar.ax.set_ylabel("Stress", fontweight="bold")
+            cbar.set_ticks([])
 
-        plt.tight_layout()
+
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
 
         return ax, cbar
 

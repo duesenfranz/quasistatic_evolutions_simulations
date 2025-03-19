@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib import axes
 from matplotlib import figure
+from matplotlib.figure import Figure
+import torch
 from tqdm import tqdm
 import numpy as np
 from dataclasses import dataclass
@@ -12,7 +14,14 @@ from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.animation as animation
 import os
 from typing import Literal, Tuple
-from quasistatic_evol.rod_simulator import SimulationStepResult, load_and_interpolate, load_simulations, SystemState
+from quasistatic_evol.rod_simulator import (
+    SimulationStepResult,
+    Simulator,
+    load_and_interpolate,
+    load_simulations,
+    SystemState,
+    read_config,
+)
 
 
 class Plotter:
@@ -97,7 +106,7 @@ class Plotter:
         ax.set_title("Number of Iterations Until Convergence")
         for name, steps in self.simulations.items():
             x_data = np.linspace(start_time, end_time, len(steps), endpoint=False)
-            color = self.color_map[name] 
+            color = self.color_map[name]
             ax.plot(
                 x_data,
                 [result.iterations for result in steps],
@@ -141,7 +150,7 @@ class Plotter:
         ax.set_title(r"$\mu^\delta$")
         for name, steps in self.simulations.items():
             x_data = np.linspace(start_time, end_time, len(steps), endpoint=False)
-            color = self.color_map[name] 
+            color = self.color_map[name]
             ax.vlines(
                 x_data,
                 ymax=0,
@@ -195,7 +204,8 @@ class Plotter:
             ax.legend()
         return ax
 
-def plot_energy_sums(results:list[SimulationStepResult], ax: axes.Axes | None = None):
+
+def plot_energy_sums(results: list[SimulationStepResult], ax: axes.Axes | None = None):
     """
     Plot the sum of the energies over time for a single simulation
     """
@@ -206,12 +216,14 @@ def plot_energy_sums(results:list[SimulationStepResult], ax: axes.Axes | None = 
     sns.set_style("whitegrid")
     sns.set_context("notebook", font_scale=1.2)
     ax.set_xlabel("$t$")
+
     # reduce the mus by summing over them
     def get_mu_sum():
         current_sum = 0
         for result in results:
             current_sum += result.energy_before_system_transition - result.energy
             yield current_sum
+
     mu_sums = np.array(list(get_mu_sum()))
     energies_after = np.array([result.energy for result in results])
     integral = energies_after + mu_sums
@@ -220,6 +232,56 @@ def plot_energy_sums(results:list[SimulationStepResult], ax: axes.Axes | None = 
     ax.plot(x_data, energies_after, label="$E_t(u^\delta(t))$")
     ax.legend()
     return ax
+
+
+def plot_key_frames(
+    results: list[SimulationStepResult], simulator: Simulator
+) -> Figure:
+    """
+    Plot the key frames of a simulation.
+    This means the first frame, the frame right before breakage, the one right after breakage
+    and the last frame.
+    """
+    fig, axes = plt.subplots(1, 4, figsize=(14, 4))
+    max_stress = torch.min(simulator.initialize_surface_energy()).item() * 1.2
+    mu = [result.energy_before_system_transition - result.energy for result in results]
+    max_mu_index = np.argmax(mu)
+    before_breakage = results[max(0, max_mu_index - 1)]  # type: ignore
+    after_breakage = results[max_mu_index]
+    # start with the last plot b/c that's where the colorbar should be
+    _, cbar = simulator.plot_simulation_step(
+        results[-1].SystemState,
+        results[-1].time,
+        results[-1].energy,
+        max_stress,
+        ax=axes[3],
+        fig=fig,
+        cbar=None,
+        title="Final",
+    )
+
+    for title, ax, result in zip(
+        ["Initial", "Before Breakage", "After Breakage"],
+        axes,
+        [results[0], before_breakage, after_breakage],
+    ):
+        simulator.plot_simulation_step(
+            result.SystemState,
+            result.time,
+            result.energy,
+            max_stress,
+            ax=ax,
+            fig=fig,
+            cbar=cbar,
+            title=title
+        )
+    fig.tight_layout()
+    return fig
+
+def save_three_formats(fig: Figure, path: Path):
+    fig.savefig(path.with_suffix(".svg"))
+    fig.savefig(path.with_suffix(".png"), dpi=300)
+    fig.savefig(path.with_suffix(".pdf"))
 
 def create_plots(output_path: Path):
     """
@@ -235,44 +297,48 @@ def create_plots(output_path: Path):
     plotter.plot_mu(ax=ax3)
     plotter.plot_d(ax=ax4)
     fig.tight_layout()
-    fig.savefig(output_path / "combined.svg")
-    fig.savefig(output_path / "combined.png", dpi=300)
+    save_three_formats(fig, output_path / "combined")
     plt.close(fig)
 
     # plot individual
     individual_fig = plt.figure(figsize=(12, 8))
     individual_ax = individual_fig.add_subplot(111)
     plotter.plot_energies(ax=individual_ax)
-    individual_fig.savefig(output_path / "energies.svg")
-    individual_fig.savefig(output_path / "energies.png", dpi=300)
+    save_three_formats(individual_fig, output_path / "energies")
     individual_ax.clear()
     plotter.plot_iteration_number(ax=individual_ax)
-    individual_fig.savefig(output_path / "iterations.svg")
-    individual_fig.savefig(output_path / "iterations.png", dpi=300)
+    save_three_formats(individual_fig, output_path / "iterations")
     individual_ax.clear()
     plotter.plot_mu(ax=individual_ax)
-    individual_fig.savefig(output_path / "mu.svg")
-    individual_fig.savefig(output_path / "mu.png", dpi=300)
+    save_three_formats(individual_fig, output_path / "mu")
     individual_ax.clear()
     plotter.plot_d(ax=individual_ax)
-    individual_fig.savefig(output_path / "d.svg")
-    individual_fig.savefig(output_path / "d.png", dpi=300)
+    save_three_formats(individual_fig, output_path / "d")
     plt.close(individual_fig)
     individual_ax.clear()
     plt.close(individual_fig)
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 5), sharey=True)
-    plot_energy_sums(interpolated_simulations["15"], ax=axes[0])
-    plot_energy_sums(interpolated_simulations["240"], ax=axes[1])
+    n_of_configs = len(interpolated_simulations)
+    fig, axes = plt.subplots(1, n_of_configs, figsize=(10, 5), sharey=True)
+    for i, result in enumerate(interpolated_simulations.values()):
+        plot_energy_sums(result, ax=axes[i])
     fig.tight_layout()
-    fig.savefig(output_path / "energy_sums.svg") 
-    fig.savefig(output_path / "energy_sums.png", dpi=300)   
+    save_three_formats(fig, output_path / "energy_sums")
     plt.close(fig)
+
+    configs = read_config()
+    for name, results in interpolated_simulations.items():
+        simulator = Simulator(configs[name])
+        key_frames_fig = plot_key_frames(results, simulator)
+        save_three_formats(key_frames_fig, output_path / f"key_frames_{name}")
+        plt.close(key_frames_fig)
+
 
 def main():
     OUTPUT_PATH = Path(__file__).parent / "plots"
     OUTPUT_PATH.mkdir(exist_ok=True)
     create_plots(OUTPUT_PATH)
+
 
 if __name__ == "__main__":
     main()
