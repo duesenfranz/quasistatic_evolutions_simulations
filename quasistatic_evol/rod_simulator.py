@@ -285,6 +285,7 @@ class Simulator:
         fig: figure.Figure | None = None,
         cbar: colorbar.Colorbar | None = None,
         title: str | None = "Rod Configuration",
+        cax: axes.Axes | None = None,
     ) -> Tuple[axes.Axes, colorbar.Colorbar]:
         """
         Plot the simulation step.
@@ -343,7 +344,7 @@ class Simulator:
                 cmap=cmap, norm=mcolors.Normalize(vmin=0, vmax=max_stress)
             )
             sm.set_array([])
-            cbar = fig.colorbar(sm, ax=ax, label="Stress", pad=0.1)
+            cbar = fig.colorbar(sm, cax=cax, ax=ax if cax is None else None, label="Stress", pad=0.1)
             cbar.ax.set_ylabel("Stress", fontweight="bold")
             cbar.set_ticks([])
 

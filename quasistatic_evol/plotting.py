@@ -2,9 +2,10 @@ import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from matplotlib import axes
+from matplotlib import axes, gridspec
 from matplotlib import figure
 from matplotlib.figure import Figure
+from matplotlib import colorbar
 import torch
 from tqdm import tqdm
 import numpy as np
@@ -235,46 +236,42 @@ def plot_energy_sums(results: list[SimulationStepResult], ax: axes.Axes | None =
 
 
 def plot_key_frames(
-    results: list[SimulationStepResult], simulator: Simulator
+    simulations: dict[str, list[SimulationStepResult]], simulators: dict[str, Simulator]
 ) -> Figure:
     """
     Plot the key frames of a simulation.
     This means the first frame, the frame right before breakage, the one right after breakage
     and the last frame.
     """
-    fig, axes = plt.subplots(1, 4, figsize=(14, 4))
-    max_stress = torch.min(simulator.initialize_surface_energy()).item() * 1.2
-    mu = [result.energy_before_system_transition - result.energy for result in results]
-    max_mu_index = np.argmax(mu)
-    before_breakage = results[max(0, max_mu_index - 1)]  # type: ignore
-    after_breakage = results[max_mu_index]
-    # start with the last plot b/c that's where the colorbar should be
-    _, cbar = simulator.plot_simulation_step(
-        results[-1].SystemState,
-        results[-1].time,
-        results[-1].energy,
-        max_stress,
-        ax=axes[3],
-        fig=fig,
-        cbar=None,
-        title="Final",
-    )
+    # fig, all_axes = plt.subplots(len(simulations), 4, figsize=(14, 4))
+    fig = plt.figure(figsize=(14, 4 * len(simulations)))
+    gs = gridspec.GridSpec(len(simulations), 5, width_ratios=[1, 1, 1, 1, 0.05])
+    all_axes = [[fig.add_subplot(gs[i, j]) for j in range(4)] for i in range(len(simulations))]
+    cbar_ax = fig.add_subplot(gs[:, 4])
+    max_stress = torch.min(list(simulators.values())[0].initialize_surface_energy()).item() * 1.2
+    cbar = None
+    for (name, results), axes in zip(simulations.items(), all_axes):
+        mu = [result.energy_before_system_transition - result.energy for result in results]
+        max_mu_index = np.argmax(mu)
+        before_breakage = results[max(0, max_mu_index - 1)]  # type: ignore
+        after_breakage = results[max_mu_index]
 
-    for title, ax, result in zip(
-        ["Initial", "Before Breakage", "After Breakage"],
-        axes,
-        [results[0], before_breakage, after_breakage],
-    ):
-        simulator.plot_simulation_step(
-            result.SystemState,
-            result.time,
-            result.energy,
-            max_stress,
-            ax=ax,
-            fig=fig,
-            cbar=cbar,
-            title=title
-        )
+        for title, ax, result in zip(
+            ["Initial", "Before Breakage", "After Breakage", "Final"],
+            axes,
+            [results[0], before_breakage, after_breakage, results[-1]],
+        ):
+            _, cbar = simulators[name].plot_simulation_step(
+                result.SystemState,
+                result.time,
+                result.energy,
+                max_stress,
+                ax=ax,
+                fig=fig,
+                cbar=cbar,
+                title=title,
+                cax=cbar_ax,
+            )
     fig.tight_layout()
     return fig
 
@@ -327,11 +324,15 @@ def create_plots(output_path: Path):
     plt.close(fig)
 
     configs = read_config()
-    for name, results in interpolated_simulations.items():
-        simulator = Simulator(configs[name])
-        key_frames_fig = plot_key_frames(results, simulator)
-        save_three_formats(key_frames_fig, output_path / f"key_frames_{name}")
-        plt.close(key_frames_fig)
+    # for name, results in interpolated_simulations.items():
+    #     simulator = Simulator(configs[name])
+    #     key_frames_fig = plot_key_frames(results, simulator)
+    #     save_three_formats(key_frames_fig, output_path / f"key_frames_{name}")
+    #     plt.close(key_frames_fig)
+    simulators = {name: Simulator(config) for name, config in configs.items()}
+    key_frames_fig = plot_key_frames(interpolated_simulations, simulators)
+    save_three_formats(key_frames_fig, output_path / "key_frames")
+    plt.close(key_frames_fig)
 
 
 def main():
