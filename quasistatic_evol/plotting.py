@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import string
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib import axes, gridspec
@@ -250,14 +251,12 @@ def plot_key_frames(
     cbar_ax = fig.add_subplot(gs[:, 4])
     max_stress = torch.min(list(simulators.values())[0].initialize_surface_energy()).item() * 1.2
     cbar = None
-    for (name, results), axes in zip(simulations.items(), all_axes):
+    for letter, (name, results), axes in zip(string.ascii_lowercase, simulations.items(), all_axes):
         mu = [result.energy_before_system_transition - result.energy for result in results]
         max_mu_index = np.argmax(mu)
         before_breakage = results[max(0, max_mu_index - 1)]  # type: ignore
         after_breakage = results[max_mu_index]
-
-        for title, ax, result in zip(
-            ["Initial", "Before Breakage", "After Breakage", "Final"],
+        for ax, result in zip(
             axes,
             [results[0], before_breakage, after_breakage, results[-1]],
         ):
@@ -269,9 +268,13 @@ def plot_key_frames(
                 ax=ax,
                 fig=fig,
                 cbar=cbar,
-                title=title,
+                title=None,
                 cax=cbar_ax,
             )
+        axes[0].set_ylabel(f"({letter})", fontsize=12, labelpad=15, rotation=0)
+    for ax, col_label in zip(all_axes[0], ["(i): Initial", "(ii): Before Breakage", "(iii): After Breakage", "(iv): Final"]):
+        ax.set_title(col_label, fontsize=12, pad=10)
+    
     fig.tight_layout()
     return fig
 

@@ -1,6 +1,5 @@
 FROM ubuntu
 
-RUN apt-get update
-RUN apt-get install -y python3 python3-pip curl git
+RUN apt-get update && apt-get install -y python3 python3-pip curl git ffmpeg
 RUN curl -sSL https://install.python-poetry.org | python3 -
 ENV PATH="${PATH}:/root/.local/bin/"
