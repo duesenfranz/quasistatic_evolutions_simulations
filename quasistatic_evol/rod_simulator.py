@@ -286,6 +286,7 @@ class Simulator:
         cbar: colorbar.Colorbar | None = None,
         title: str | None = "Rod Configuration",
         cax: axes.Axes | None = None,
+        point_size: float=10,
     ) -> Tuple[axes.Axes, colorbar.Colorbar]:
         """
         Plot the simulation step.
@@ -310,9 +311,6 @@ class Simulator:
             fig = self.fig
         ax.clear()
 
-        sns.set_style("whitegrid")
-        sns.set_context("notebook", font_scale=1.2)
-
         colors = ["#4575b4", "#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027"]
         n_bins = 100
         cmap = LinearSegmentedColormap.from_list("custom", colors, N=n_bins)
@@ -328,7 +326,7 @@ class Simulator:
                     alpha=0.8,
                 )
 
-        ax.scatter(full_rod[:, 0], full_rod[:, 1], color="#2c3e50", s=10, zorder=5)
+        ax.scatter(full_rod[:, 0], full_rod[:, 1], color="#2c3e50", s=point_size, zorder=5, alpha=.8)
 
         if title:
             ax.set_title(
