@@ -183,16 +183,16 @@ class Plotter:
             color = self.color_map[name]
             ax.vlines(
                 x_data,
-                ymax=0,
-                ymin=[
-                    result.energy - result.energy_before_system_transition
+                ymax=[
+                    result.energy_before_system_transition - result.energy
                     for result in steps
                 ],
+                ymin=0,
                 label=r"$\delta = \frac{1}{" + name + r"}$",
                 colors=color,
             )
         if add_legend:
-            ax.legend(loc='lower left')
+            ax.legend(loc='upper left')
         return ax
 
     def plot_d(
