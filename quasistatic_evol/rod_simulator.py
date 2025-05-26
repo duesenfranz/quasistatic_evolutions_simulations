@@ -31,17 +31,20 @@ class SimulationConfig:
     learning_rate: float = 0.1
     decay_factor: float = 1
     min_learning_rate: float = 0.001
-    tolerance: float = 5e-4
+    tolerance: float = 5e-5
     max_iterations: int = 100000
     d: float = 5
     time_steps: int = 20
     plot_interval: int = N // 10
     error_norm_p: int = 2
+    use_bdf2: bool = False
+
 
 @dataclass
 class SystemState:
     free_nodes: Tensor
     breakages: Tensor
+
 
 @dataclass
 class SimulationStepResult:
@@ -51,8 +54,6 @@ class SimulationStepResult:
     SystemState: SystemState
     time: float
     iterations: int
-
-
 
 
 class Simulator:
@@ -73,8 +74,14 @@ class Simulator:
             not free for free in self.free_rod_nodes_indices
         ]
         initial_system_state = self.initialize_system_state()
-        self.get_energy_traced = torch.jit.trace(self.get_energy, [Tensor([0]), initial_system_state.free_nodes, initial_system_state.breakages])
-
+        self.get_energy_traced = torch.jit.trace(
+            self.get_energy,
+            [
+                Tensor([0]),
+                initial_system_state.free_nodes,
+                initial_system_state.breakages,
+            ],
+        )
 
     def initialize_surface_energy(self) -> Tensor:
         """
@@ -100,7 +107,7 @@ class Simulator:
         """
         x_positions = torch.linspace(0, self.config.W, self.config.N)
         y_positions = torch.zeros(self.config.N)
-        free_nodes =  torch.stack([x_positions, y_positions], dim=1)[ 1:-1, :]
+        free_nodes = torch.stack([x_positions, y_positions], dim=1)[1:-1, :]
         breakages = torch.zeros(self.config.N - 1)
         return SystemState(free_nodes, breakages)
 
@@ -112,10 +119,14 @@ class Simulator:
         :param controlled_nodes: Controlled nodes
         :return: Assembled rod
         """
-        res = torch.empty((len(self.controlled_nodes_indices), free_nodes.shape[1]), dtype=free_nodes.dtype)
+        res = torch.empty(
+            (len(self.controlled_nodes_indices), free_nodes.shape[1]),
+            dtype=free_nodes.dtype,
+        )
         res[self.free_rod_nodes_indices] = free_nodes
         res[self.controlled_nodes_indices] = controlled_nodes
         return res
+
     def get_controlled_nodes_position(self, time: Tensor | float) -> Tensor:
         """
         Get the position of the controlled nodes at a given time.
@@ -129,7 +140,8 @@ class Simulator:
             [torch.zeros((1, 1)), time.view(1, 1) * self.config.d], dim=1
         )
         last_position = torch.cat(
-            [torch.ones((1, 1)) * self.config.W, -time.view(1, 1) * self.config.d], dim=1
+            [torch.ones((1, 1)) * self.config.W, -time.view(1, 1) * self.config.d],
+            dim=1,
         )
         return torch.cat([first_position, last_position], dim=0)
 
@@ -185,9 +197,9 @@ class Simulator:
         """
         controlled_nodes_position = self.get_controlled_nodes_position(time)
         rod = self.assemble_rod(free_nodes, controlled_nodes_position)
-        return self.compute_surface_energy(
-            breakages
-        ) + self.compute_elastic_energy(rod, breakages)
+        return self.compute_surface_energy(breakages) + self.compute_elastic_energy(
+            rod, breakages
+        )
 
     def transition_system_gradient_descent(
         self,
@@ -196,7 +208,7 @@ class Simulator:
     ) -> tuple[SystemState, Tensor, int]:
         """
         Let the system transition using gradient descent until it lands on a critical point.
-        
+
         :param time: Time of shape (1,)
         :param initial_system_state: Initial system state
         :return: Final positions, final energy, and number of iterations
@@ -220,11 +232,16 @@ class Simulator:
                 if system_state.breakages.grad is not None:
                     system_state.breakages.grad.zero_()
 
-            energy = self.get_energy_traced(time, system_state.free_nodes, system_state.breakages)
+            energy = self.get_energy_traced(
+                time, system_state.free_nodes, system_state.breakages
+            )
             energy.backward()  # type: ignore
 
             with torch.no_grad():
-                if system_state.free_nodes.grad is None or system_state.breakages.grad is None:
+                if (
+                    system_state.free_nodes.grad is None
+                    or system_state.breakages.grad is None
+                ):
                     raise TypeError("The gradients are None")
                 gradient_norm = np.linalg.norm(
                     (system_state.free_nodes.grad).cpu().numpy().flatten(),
@@ -253,10 +270,110 @@ class Simulator:
 
         return system_state, energy.detach(), iteration
 
+    def transition_system_bdf2(
+        self,
+        time: Tensor,
+        initial_system_state: SystemState,
+    ) -> tuple[SystemState, Tensor, int]:
+        """
+        Transition the system using the BDF2 method until it lands on a critical point.
+        :param time: Time of shape (1,)
+        :param initial_system_state: Initial system state
+        :param previous_system_state: Previous system state
+        :return: Final positions, final energy, and number of iterations
+        """
+        if not callable(self.get_energy_traced):
+            raise TypeError("Somehow, the tracing went wrong")
+
+        current_state = SystemState(
+            initial_system_state.free_nodes.clone(),
+            initial_system_state.breakages.clone(),
+        )
+        previous_state = current_state
+        current_lr = self.config.learning_rate
+        inner_tol = self.config.tolerance / 5
+
+        for iteration in tqdm(range(self.config.max_iterations), leave=False):
+            new_state = SystemState(
+                current_state.free_nodes.clone(),
+                current_state.breakages.clone(),
+            )
+            for _ in range(self.config.max_iterations):
+                new_state.free_nodes.requires_grad_(True)
+                new_state.breakages.requires_grad_(True)
+                new_state.free_nodes.retain_grad()
+                new_state.breakages.retain_grad()
+                with torch.no_grad():
+                    if new_state.free_nodes.grad is not None:
+                        new_state.free_nodes.grad.zero_()
+                    if new_state.breakages.grad is not None:
+                        new_state.breakages.grad.zero_()
+
+                energy = self.get_energy_traced(
+                    time, new_state.free_nodes, new_state.breakages
+                )
+                energy.backward()  # type: ignore
+
+                with torch.no_grad():
+                    if (
+                        new_state.free_nodes.grad is None
+                        or new_state.breakages.grad is None
+                    ):
+                        raise TypeError("The gradients are None")
+                    
+                    new_free_nodes = (
+                        -2 / 3 * current_lr * new_state.free_nodes.grad
+                        + 1
+                        / 3
+                        * (4 * current_state.free_nodes - previous_state.free_nodes)
+                    )
+                    new_breakages = (
+                        -2 / 3 * current_lr * new_state.breakages.grad
+                        + 1
+                        / 3
+                        * (4 * current_state.breakages - previous_state.breakages)
+                    )
+                    new_breakages.clamp_(0, 1)
+                    diff = np.linalg.norm(
+                        (new_free_nodes - new_state.free_nodes).cpu().numpy().flatten(),
+                        ord=self.config.error_norm_p,
+                    ) + np.linalg.norm(
+                        (new_breakages - new_state.breakages).cpu().numpy().flatten(),
+                        ord=self.config.error_norm_p,
+                    )
+                    new_state.free_nodes = new_free_nodes.clone()
+                    new_state.breakages = new_breakages.clone()
+                if diff < inner_tol:
+                    break
+            else:
+                raise RuntimeError(
+                    "Inner loop did not converge. Increase max_iterations or decrease inner_tol."
+                )
+            fractor_gradient_finished = (new_state.breakages == 0) | (
+                new_state.breakages == 1
+            )
+            gradient_norm = np.linalg.norm(
+                (new_state.free_nodes - current_state.free_nodes).cpu().numpy().flatten(),
+                ord=self.config.error_norm_p,
+            )
+            if fractor_gradient_finished.all() and (
+                gradient_norm < self.config.tolerance
+            ):
+                break
+            previous_state = current_state
+            current_state = new_state
+
+        else:
+            print("Maximum iterations reached without convergence.")
+            print(f"Final Gradient Norm: {gradient_norm}")
+            print(f"Fracture vector: {current_state.breakages}")
+
+        return current_state, energy.detach(), iteration
+
     def calculate_energy_time_derivative(
-            self,
-            time: Tensor,
-            system_state: SystemState,
+        self,
+        time: Tensor,
+        system_state: SystemState,
     ) -> Tensor:
         """
         Calculate the energy time derivative.
@@ -268,10 +385,12 @@ class Simulator:
         if not callable(self.get_energy_traced):
             raise TypeError("Somehow, the tracing went wrong")
         time.requires_grad_(True)
-        
+
         if time.grad is not None:
             time.grad.zero_()
-        energy = self.get_energy_traced(time, system_state.free_nodes, system_state.breakages)
+        energy = self.get_energy_traced(
+            time, system_state.free_nodes, system_state.breakages
+        )
         energy.backward()  # type: ignore
         return time.grad  # type: ignore
 
@@ -286,7 +405,7 @@ class Simulator:
         cbar: colorbar.Colorbar | None = None,
         title: str | None = "Rod Configuration",
         cax: axes.Axes | None = None,
-        point_size: float=10,
+        point_size: float = 10,
     ) -> Tuple[axes.Axes, colorbar.Colorbar]:
         """
         Plot the simulation step.
@@ -301,8 +420,15 @@ class Simulator:
         :param title: Title of the plot
         :return: Axes and Colorbar
         """
-        full_rod = self.assemble_rod(system_state.free_nodes, self.get_controlled_nodes_position(time))
-        stress = self.compute_stress_vector(full_rod, system_state.breakages).detach().cpu().numpy()
+        full_rod = self.assemble_rod(
+            system_state.free_nodes, self.get_controlled_nodes_position(time)
+        )
+        stress = (
+            self.compute_stress_vector(full_rod, system_state.breakages)
+            .detach()
+            .cpu()
+            .numpy()
+        )
         full_rod = full_rod.detach().cpu().numpy()
         if ax is None or fig is None:
             if self.fig is None or self.ax is None:
@@ -315,18 +441,24 @@ class Simulator:
         n_bins = 100
         cmap = LinearSegmentedColormap.from_list("custom", colors, N=n_bins)
 
-
         for i in range(len(full_rod) - 1):
             if system_state.breakages[i] == 0:
                 ax.plot(
-                    [full_rod[i,0], full_rod[i + 1, 0]],
+                    [full_rod[i, 0], full_rod[i + 1, 0]],
                     [full_rod[i, 1], full_rod[i + 1, 1]],
                     color=cmap(stress[i] / max_stress),
                     linewidth=2.5,
                     alpha=0.8,
                 )
 
-        ax.scatter(full_rod[:, 0], full_rod[:, 1], color="#2c3e50", s=point_size, zorder=5, alpha=.8)
+        ax.scatter(
+            full_rod[:, 0],
+            full_rod[:, 1],
+            color="#2c3e50",
+            s=point_size,
+            zorder=5,
+            alpha=0.8,
+        )
 
         if title:
             ax.set_title(
@@ -342,24 +474,26 @@ class Simulator:
                 cmap=cmap, norm=mcolors.Normalize(vmin=0, vmax=max_stress)
             )
             sm.set_array([])
-            cbar = fig.colorbar(sm, cax=cax, ax=ax if cax is None else None, label="Stress", pad=0.1)
+            cbar = fig.colorbar(
+                sm, cax=cax, ax=ax if cax is None else None, label="Stress", pad=0.1
+            )
             cbar.ax.set_ylabel("Stress", fontweight="bold")
             cbar.set_ticks([])
-
 
         ax.set_xticklabels([])
         ax.set_yticklabels([])
 
         return ax, cbar
 
-    
-    def run_simulation(self, callback: Literal["plot","none"]="plot") -> list[SimulationStepResult]:
+    def run_simulation(
+        self, callback: Literal["plot", "none"] = "plot"
+    ) -> list[SimulationStepResult]:
         """
         Run the simulation.
 
         :return: List of SimulationStepResult
         """
-        
+
         plt.ion()
         ax, cbar = None, None
         time = torch.linspace(0, 1, self.config.time_steps)
@@ -367,15 +501,24 @@ class Simulator:
         max_stress = torch.min(self.surface_energy_constants).item() * 1.2
 
         simulation_results = []
-        iterator =  tqdm(time)
+        iterator = tqdm(time)
         for t in iterator:
-            energy_before = self.get_energy(t, current_system_state.free_nodes, current_system_state.breakages)
-            current_system_state, energy, iterations = self.transition_system_gradient_descent(
-                t, current_system_state
+            energy_before = self.get_energy(
+                t, current_system_state.free_nodes, current_system_state.breakages
             )
+            if not self.config.use_bdf2:
+                current_system_state, energy, iterations = (
+                    self.transition_system_gradient_descent(t, current_system_state)
+                )
+            else:
+                current_system_state, energy, iterations = (
+                    self.transition_system_bdf2(t, current_system_state)
+                )
             iterator.set_description(f"Time: {t.item():.2f}, Iterations: {iterations}")
             energy_float = energy.item()
-            energy_gradient = self.calculate_energy_time_derivative(t, current_system_state)
+            energy_gradient = self.calculate_energy_time_derivative(
+                t, current_system_state
+            )
             simulation_results.append(
                 SimulationStepResult(
                     energy_before_system_transition=energy_before.item(),
@@ -388,13 +531,21 @@ class Simulator:
             )
             if callback == "plot":
                 ax, cbar = self.plot_simulation_step(
-                    current_system_state, t, energy_float, max_stress, ax, self.fig, cbar
+                    current_system_state,
+                    t,
+                    energy_float,
+                    max_stress,
+                    ax,
+                    self.fig,
+                    cbar,
                 )
                 plt.draw()
                 plt.pause(0.1)
         return simulation_results
 
-    def fill_up_simulation(self, simulation_results: list[SimulationStepResult], factor: int):
+    def fill_up_simulation(
+        self, simulation_results: list[SimulationStepResult], factor: int
+    ):
         """
         Fill up the simulation results.
 
@@ -409,9 +560,14 @@ class Simulator:
             filled_simulation_results.append(result)
             if i < len(simulation_results) - 1:
                 for j in range(1, factor):
-                    time = result.time + j * (simulation_results[i + 1].time - result.time) / factor
+                    time = (
+                        result.time
+                        + j * (simulation_results[i + 1].time - result.time) / factor
+                    )
                     new_energy = self.get_energy_traced(
-                        torch.tensor([time]), result.SystemState.free_nodes, result.SystemState.breakages
+                        torch.tensor([time]),
+                        result.SystemState.free_nodes,
+                        result.SystemState.breakages,
                     )
                     new_energy_gradient = self.calculate_energy_time_derivative(
                         torch.tensor([time]), result.SystemState
@@ -427,7 +583,6 @@ class Simulator:
                         )
                     )
         return filled_simulation_results
-
 
 
 def read_config() -> dict[str, SimulationConfig]:
@@ -459,7 +614,9 @@ def do_all_simulations(overwrite: bool = False, plot: bool = True):
             continue
         simulator = Simulator(config)
         print(f"Simulating {i}/{len(configs)}: {name}...")
-        simulation_results = simulator.run_simulation(callback="plot" if plot else "none")
+        simulation_results = simulator.run_simulation(
+            callback="plot" if plot else "none"
+        )
         with open(result_path, "wb") as file:
             pickle.dump(simulation_results, file)
 
@@ -470,9 +627,11 @@ def load_simulations() -> dict[str, list[SimulationStepResult]]:
 
     :return: Dictionary of simulation results
     """
+
     def load_file(path: Path) -> list[SimulationStepResult]:
         with open(path, "rb") as file:
             return pickle.load(file)
+
     configs = read_config()
     return {name: load_file(RESULT_DIR / name) for name in configs.keys()}
 
@@ -497,8 +656,6 @@ def load_and_interpolate(total_frames: int) -> dict[str, list[SimulationStepResu
         )
 
     return {name: get_interpolated(name) for name in configs.keys()}
-
-
 
 
 def main():

@@ -1,8 +1,10 @@
 {
   "15": {
-    "time_steps": 16
+    "time_steps": 16,
+    "use_bdf2": true
   },
   "240": {
-    "time_steps": 241
+    "time_steps": 241,
+    "use_bdf2": true
   }
 }
