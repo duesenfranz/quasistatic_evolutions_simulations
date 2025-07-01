@@ -2,6 +2,8 @@
 
 # Simulations for Quasi-Static Evolutions
 
+This is the simulations code for *Balanced quasistatic evolutions of critical points in metric spaces* ([arXiv:2506.09812](https://arxiv.org/abs/2506.09812)).
+
 An elastic rod is simulated as $n$ connected nodes.
 The two outmost nodes are controlled, while all other nodes move as dictated by a (discrete) quasistatic evolution.
 More concretely, we let the two outermost nodes evolve for some time small time $\delta$, after which we let the system
